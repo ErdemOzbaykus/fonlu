@@ -1,0 +1,679 @@
+const $ = (id) => document.getElementById(id);
+const api = async (path, opts) => {
+  const r = await fetch("/api" + path, opts);
+  const body = r.status === 204 ? null : await r.json();
+  if (!r.ok) throw new Error(body?.detail || r.statusText);
+  return body;
+};
+const esc = (s) => String(s ?? "").replace(/[<>&"]/g, (c) =>
+  ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+const num = (v, d = 2) => (v == null ? "—" : v.toLocaleString("tr-TR",
+  { minimumFractionDigits: d, maximumFractionDigits: d }));
+const compact = (v) => (v == null ? "—" : v.toLocaleString("tr-TR",
+  { notation: "compact", maximumFractionDigits: 1 }));
+const int = (v) => (v == null ? "—" : v.toLocaleString("tr-TR"));
+const cls = (v) => (v == null ? "muted" : v >= 0 ? "up" : "down");
+const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${num(v)}%`);
+const cell = (v) => `<td class="num ${cls(v)}">${pct(v)}</td>`;
+const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10);
+// "1 ay önce" = önceki ayın aynı günü. TEFAS dönemleri takvim ayı; 30 gün geriye
+// gitmek anchor'ı kaydırıp getiriyi TEFAS'la uyumsuz hale getiriyor.
+function monthsBack(isoDate, months) {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const total = y * 12 + (m - 1) - months;
+  const yy = Math.floor(total / 12), mm = (total % 12) + 1;
+  const last = new Date(Date.UTC(yy, mm, 0)).getUTCDate();
+  return `${yy}-${String(mm).padStart(2, "0")}-${String(Math.min(d, last)).padStart(2, "0")}`;
+}
+// Dönemler piyasadaki son veri gününe göre kurulur; bugüne göre değil, yoksa
+// hafta sonu / tatilde dönem bir-iki gün kayıyor.
+let lastDataDate = iso(new Date());
+
+const GROUPS = ["Hisse Senedi", "Kıymetli Maden", "Para Piyasası", "Borçlanma Aracı",
+                "Döviz", "Fon Sepeti", "Diğer"];
+const GROUP_HEX = ["#f0a13c", "#d9c46b", "#4f9bd9", "#7a86c9", "#4bbfa8", "#c47ab5", "#5c6480"];
+
+// TEFAS ships the breakdown columns in English; label the ones funds actually use.
+const ALLOC_TR = {
+  stock: "Hisse senedi", government_bond: "Devlet tahvili", treasury_bill: "Hazine bonosu",
+  financing_bill: "Finansman bonosu", private_sector_bond: "Özel sektör tahvili",
+  bank_bill: "Banka bonosu", asset_backed_securities: "Varlığa dayalı menkul kıymet",
+  eurobond: "Eurobond", repo: "Repo", reverse_repo: "Ters repo", term_deposit: "Vadeli mevduat",
+  deposit_tl: "Mevduat (TL)", deposit_fx: "Mevduat (döviz)", deposit_gold: "Mevduat (altın)",
+  participation_account: "Katılma hesabı", participation_account_tl: "Katılma hesabı (TL)",
+  participation_account_fx: "Katılma hesabı (döviz)", participation_account_gold: "Katılma hesabı (altın)",
+  precious_metals: "Kıymetli madenler", precious_metals_etf: "Kıymetli maden BYF",
+  precious_metals_government_debt: "Kıymetli maden devlet borçlanma",
+  foreign_security: "Yabancı menkul kıymet", foreign_stock: "Yabancı hisse",
+  foreign_debt_security: "Yabancı borçlanma aracı", foreign_etf: "Yabancı BYF",
+  investment_fund: "Yatırım fonu", etf: "Borsa yatırım fonu", derivative: "Türev araç",
+  takasbank_money_market: "Takasbank para piyasası", bist_money_market: "BİST para piyasası",
+  government_lease_certificate: "Kira sertifikası", government_lease_certificate_tl: "Kira sertifikası (TL)",
+  government_lease_certificate_fx: "Kira sertifikası (döviz)",
+  private_sector_lease_certificate: "Özel sektör kira sertifikası",
+  fund_participation_certificate: "Fon katılma belgesi",
+  futures_cash_collateral: "Vadeli işlem nakit teminatı", real_estate_investment: "Gayrimenkul yatırımı",
+  venture_capital_fund: "Girişim sermayesi fonu", other: "Diğer",
+  bist_committed_buy: "BİST taahhütlü işlem (alış)",
+  bist_committed_sell: "BİST taahhütlü işlem (satış)",
+  government_external_debt: "Devlet dış borçlanma aracı",
+  private_sector_external_debt: "Özel sektör dış borçlanma aracı",
+  foreign_government_debt: "Yabancı kamu borçlanma aracı",
+  foreign_private_sector_debt: "Yabancı özel sektör borçlanma aracı",
+  fx_government_internal_debt: "Dövize endeksli devlet iç borçlanma aracı",
+  government_foreign_lease_certificate: "Kamu yabancı kira sertifikası",
+  private_sector_foreign_lease_certificate: "Özel sektör yabancı kira sertifikası",
+  precious_metals_lease_certificate: "Kıymetli maden kira sertifikası",
+  real_estate_certificate: "Gayrimenkul sertifikası",
+  real_estate_fund: "Gayrimenkul yatırım fonu",
+};
+const allocLabel = (k) => ALLOC_TR[k.replace(/_pct$/, "")]
+  || k.replace(/_pct$/, "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+// ---------------- charts ----------------
+Chart.defaults.color = "#8a93a8";
+Chart.defaults.borderColor = "#2c3446";
+Chart.defaults.font.family = "ui-monospace, 'SF Mono', Menlo, monospace";
+Chart.defaults.font.size = 11;
+const LINE_HEX = ["#f0a13c", "#4bbfa8", "#4f9bd9", "#c47ab5", "#e5626b",
+                  "#d9c46b", "#7a86c9", "#35c88a"];
+
+const charts = {};
+function line(id, labels, datasets, yLabel) {
+  charts[id]?.destroy();
+  charts[id] = new Chart($(id), {
+    type: "line",
+    data: {
+      labels,
+      datasets: datasets.map((d, i) => ({
+        ...d, borderColor: LINE_HEX[i % LINE_HEX.length], backgroundColor: LINE_HEX[i % LINE_HEX.length],
+        borderWidth: 1.75, pointRadius: 0, pointHitRadius: 12, tension: 0.12,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: {
+            maxTicksLimit: 7, maxRotation: 0, autoSkipPadding: 12,
+            // Full ISO dates collide on a 1-year range; '15.08.25' fits.
+            callback(i) {
+              const [y, m, d] = String(this.getLabelForValue(i)).split("-");
+              return d ? `${d}.${m}.${y.slice(2)}` : this.getLabelForValue(i);
+            },
+          },
+        },
+        y: { grid: { color: "#ffffff0d" }, title: yLabel ? { display: true, text: yLabel } : undefined },
+      },
+      plugins: {
+        legend: { display: datasets.length > 1, labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+        tooltip: { backgroundColor: "#212837", borderColor: "#2c3446", borderWidth: 1, padding: 10 },
+      },
+    },
+  });
+}
+
+// ---------------- rail / views ----------------
+document.querySelectorAll("#rail nav button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("#rail nav button, .view").forEach((e) => e.classList.remove("active"));
+  b.classList.add("active");
+  $(b.dataset.view).classList.add("active");
+  if (b.dataset.view === "portfolio") loadPortfolio();
+  if (b.dataset.view === "saved") renderSaved();
+  Object.values(charts).forEach((c) => c.resize());
+});
+
+// ---------------- status ----------------
+let statusTimer;
+async function loadStatus() {
+  clearTimeout(statusTimer);
+  try {
+    const s = await api("/status");
+    const tail = s.refresh.running
+      ? `<b>güncelleniyor…</b><br>${esc(s.refresh.log.at(-1) || "")}`
+      : s.refresh.error ? `<b class="down">hata:</b> ${esc(s.refresh.error)}` : "";
+    $("status").innerHTML =
+      `<b>${int(s.funds)}</b> fon · <b>${int(s.kap)}</b> KAP<br>son veri <b>${s.last_date || "yok"}</b><br>${tail}`;
+    if (s.refresh.running) statusTimer = setTimeout(loadStatus, 3000);
+  } catch { $("status").textContent = "API'ye ulaşılamıyor."; }
+}
+$("refresh").onclick = async () => {
+  const empty = !funds.length;
+  try {
+    await api("/refresh" + (empty ? "?days=90" : ""), { method: "POST" });
+    loadStatus();
+  } catch (e) { alert(e.message); }
+};
+
+// ---------------- scan ----------------
+let funds = [];               // also the source for the compare picker
+let sort = { k: "return_pct", dir: "desc" };
+
+function applyPeriod(months) {
+  $("s-end").value = lastDataDate;
+  $("s-start").value = monthsBack(lastDataDate, months);
+}
+$("periods").onclick = (e) => {
+  const b = e.target.closest("button[data-months]");
+  if (!b) return;
+  $("periods").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  applyPeriod(+b.dataset.months);
+  loadFunds();
+};
+// A hand-typed date is a different period than the preset says it is.
+["s-start", "s-end"].forEach((id) => $(id).onchange = () =>
+  $("periods").querySelectorAll("button").forEach((x) => x.classList.remove("on")));
+
+document.querySelectorAll("#s-table th.sortable").forEach((th) => th.onclick = () => {
+  sort = { k: th.dataset.k, dir: sort.k === th.dataset.k && sort.dir === "desc" ? "asc" : "desc" };
+  document.querySelectorAll("#s-table th").forEach((x) => x.removeAttribute("data-dir"));
+  th.dataset.dir = sort.dir;
+  renderFunds();
+});
+
+// Leveraged funds report a negative money-market leg (e.g. +123.7 stock / -23.7
+// BIST money market). Widths are scaled by the positive total so the bar still
+// reads as a composition; the short leg is named in the tooltip instead.
+function allocBar(groups) {
+  if (!groups) return "";
+  const longs = GROUPS.map((g, i) => [g, groups[g] || 0, i + 1]).filter(([, v]) => v > 0.5);
+  const total = longs.reduce((s, [, v]) => s + v, 0);
+  if (!total) return "";
+  const shorts = Object.entries(groups).filter(([, v]) => v < 0);
+  const bar = longs.map(([g, v, n]) =>
+    `<i class="g${n}" style="width:${(v / total) * 100}%" title="${g} %${num(v, 1)}"></i>`).join("");
+  const tip = shorts.length
+    ? ` title="Kaldıraçlı: ${shorts.map(([g, v]) => `${g} %${num(v, 1)}`).join(", ")}"` : "";
+  return `<div class="alloc"${tip}>${bar}</div>`;
+}
+
+function fundRow(f) {
+  return `<tr class="clickable" data-code="${f.fund_code}">
+    <td class="star-cell"><button class="star ${watched.has(f.fund_code) ? "on" : ""}"
+      data-star="${f.fund_code}" title="${watched.has(f.fund_code) ? "Kaydı kaldır" : "Kaydet"}"
+      aria-pressed="${watched.has(f.fund_code)}">${watched.has(f.fund_code) ? "★" : "☆"}</button></td>
+    <td class="l"><span class="kod">${f.fund_code}</span></td>
+    <td class="l name" title="${esc(f.fund_name)}">${esc(f.fund_name)}</td>
+    <td class="l faint" style="font-size:12px;white-space:nowrap">${f.category || "—"}</td>
+    <td class="l">${allocBar(f.groups)}</td>
+    <td class="num">${num(f.last_price, 6)}</td>
+    ${cell(f.return_pct)}
+    <td class="num muted">${compact(f.portfolio_size)}</td>
+    <td class="num muted">${int(f.investor_count)}</td></tr>`;
+}
+
+// 2.469 satırın hepsini DOM'a basmak her filtre/sıralama değişiminde ~4 sn
+// sürüyordu. Sıralama tüm kümeye uygulanıp yalnızca baştaki dilim çiziliyor.
+const PAGE = 250;
+let shown = PAGE;
+
+function renderFunds() {
+  const { k, dir } = sort, s = dir === "asc" ? 1 : -1;
+  const rows = [...funds].sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (typeof x === "string" ? x.localeCompare(y, "tr") : x - y) * s;
+  });
+  $("s-rows").innerHTML = rows.slice(0, shown).map(fundRow).join("");
+  $("s-empty").hidden = rows.length > 0;
+  $("s-more").hidden = rows.length <= shown;
+  $("s-more").textContent =
+    `${int(rows.length)} fondan ilk ${int(shown)} tanesi gösteriliyor — devamını yükle`;
+}
+
+$("s-more").onclick = () => { shown += PAGE * 4; renderFunds(); };
+
+async function loadFunds() {
+  const p = new URLSearchParams({ start: $("s-start").value, end: $("s-end").value });
+  for (const [key, el] of [["kind", "s-kind"], ["category", "s-cat"],
+                           ["min_return", "s-min"], ["min_size", "s-size"], ["q", "s-q"]]) {
+    if ($(el).value) p.set(key, $(el).value);
+  }
+  $("s-empty").hidden = false;
+  $("s-empty").textContent = "Yükleniyor…";
+  try {
+    const d = await api("/funds?" + p);
+    funds = d.funds;
+    shown = PAGE;  // yeni filtre, sayfalama başa dönsün
+    if ($("s-cat").options.length === 1) {
+      $("s-cat").insertAdjacentHTML("beforeend",
+        d.categories.map((c) => `<option>${c}</option>`).join(""));
+    }
+    renderFunds();
+    $("s-empty").textContent = "Bu filtrelere uyan fon yok.";
+  } catch (e) {
+    $("s-rows").innerHTML = "";
+    $("s-empty").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+  }
+}
+$("s-go").onclick = loadFunds;
+$("s-q").onkeydown = (e) => { if (e.key === "Enter") loadFunds(); };
+
+// ---------------- watchlist ----------------
+let watched = new Set();
+
+async function loadWatchlist() {
+  try { watched = new Set((await api("/watchlist")).codes); } catch { /* boş kalsın */ }
+  $("w-count").textContent = `${watched.size} fon`;
+}
+
+async function toggleWatch(code) {
+  const on = watched.has(code);
+  try {
+    await api(`/watchlist/${code}`, { method: on ? "DELETE" : "PUT" });
+    on ? watched.delete(code) : watched.add(code);
+  } catch (e) { alert(e.message); return; }
+  $("w-count").textContent = `${watched.size} fon`;
+  // Patch the buttons in place: re-rendering the whole table would drop the
+  // user's scroll position and keyboard focus mid-click.
+  const now = watched.has(code);
+  document.querySelectorAll(`button[data-star="${code}"]`).forEach((b) => {
+    b.classList.toggle("on", now);
+    b.textContent = now ? "★" : "☆";
+    b.title = now ? "Kaydı kaldır" : "Kaydet";
+    b.setAttribute("aria-pressed", now);
+  });
+  if ($("saved").classList.contains("active")) renderSaved();
+}
+
+// Row clicks open the drawer; the star must not.
+function rowClick(e) {
+  const star = e.target.closest("button[data-star]");
+  if (star) { e.stopPropagation(); toggleWatch(star.dataset.star); return; }
+  const tr = e.target.closest("tr[data-code]");
+  if (tr) openDrawer(tr.dataset.code);
+}
+$("s-rows").onclick = rowClick;
+$("w-rows").onclick = rowClick;
+
+// Kaydedilenler kendi isteğini atar. Taramanın filtrelenmiş sonucunu süzmek,
+// filtre veya dönem değiştiğinde kaydedilen fonun listeden düşmesine yol açıyordu.
+async function renderSaved() {
+  if (!watched.size) {
+    $("w-rows").innerHTML = "";
+    $("w-empty").hidden = false;
+    $("w-empty").textContent = "Henüz fon kaydetmediniz. “Fonlar” listesinde ☆ işaretine basın.";
+    return;
+  }
+  try {
+    const p = new URLSearchParams({ start: $("s-start").value, end: $("s-end").value,
+                                    codes: [...watched].join(",") });
+    const d = await api("/funds?" + p);
+    $("w-rows").innerHTML = d.funds.map(fundRow).join("");
+    const missing = watched.size - d.funds.length;
+    $("w-empty").hidden = d.funds.length > 0 && !missing;
+    $("w-empty").textContent = d.funds.length
+      ? `${missing} kaydedilen fonun bu tarih aralığında fiyat verisi yok.`
+      : "Kaydedilen fonların bu tarih aralığında fiyat verisi yok.";
+  } catch (e) {
+    $("w-rows").innerHTML = "";
+    $("w-empty").hidden = false;
+    $("w-empty").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+  }
+}
+
+$("w-compare").onclick = () => {
+  picked = [...watched].slice(0, 10);
+  document.querySelector('#rail nav button[data-view="compare"]').click();
+  drawCompare();
+};
+
+// ---------------- detail drawer ----------------
+function closeDrawer() {
+  $("drawer").classList.remove("open");
+  $("scrim").classList.remove("open");
+  $("drawer").setAttribute("aria-hidden", "true");
+}
+$("d-close").onclick = closeDrawer;
+$("scrim").onclick = closeDrawer;
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("picker").hidden) $("picker").hidden = true;
+  else closeDrawer();
+});
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("on", p.id === b.dataset.pane));
+  Object.values(charts).forEach((c) => c.resize());
+});
+
+async function openDrawer(code) {
+  $("drawer").classList.add("open");
+  $("scrim").classList.add("open");
+  $("drawer").setAttribute("aria-hidden", "false");
+  $("d-kod").textContent = code;
+  $("d-name").textContent = "Yükleniyor…";
+  document.querySelector('.tabs button[data-pane="d-overview"]').click();
+
+  let d;
+  try {
+    d = await api(`/funds/${code}?start=${$("s-start").value}&end=${$("s-end").value}`);
+  } catch (e) { $("d-name").innerHTML = `<span class="down">${esc(e.message)}</span>`; return; }
+
+  $("d-name").textContent = d.fund_name;
+  $("d-cat").textContent = [d.kind, d.category].filter(Boolean).join(" · ");
+  $("d-price").textContent = num(d.price, 6);
+  $("d-vol").textContent = d.volatility_pct == null ? "—" : num(d.volatility_pct) + "%";
+  for (const [id, v] of [["d-ret", d.return_pct], ["d-mdd", d.max_drawdown_pct]]) {
+    $(id).textContent = pct(v);
+    $(id).className = cls(v);
+  }
+  $("d-periods").innerHTML = Object.entries(d.periods).map(([k, v]) =>
+    `<div><small>${k} getiri</small><b class="${cls(v)}">${v == null ? "—" : pct(v)}</b></div>`).join("");
+  line("d-chart", d.series.map((r) => r.date), [{ label: d.fund_code, data: d.series.map((r) => r.price) }], "₺");
+
+  // allocation
+  const groups = Object.entries(d.groups).sort((a, b) => b[1] - a[1]);
+  $("d-allocdate").textContent = d.allocation_date
+    ? `TEFAS dağılımı · ${d.allocation_date}` : "Dağılım verisi yok.";
+  charts["d-donut"]?.destroy();
+  const slices = groups.filter(([, v]) => v > 0);  // a short leg has no slice
+  if (slices.length) {
+    charts["d-donut"] = new Chart($("d-donut"), {
+      type: "doughnut",
+      data: {
+        labels: slices.map(([g]) => g),
+        datasets: [{
+          data: slices.map(([, v]) => v),
+          backgroundColor: slices.map(([g]) => GROUP_HEX[GROUPS.indexOf(g)] || "#5c6480"),
+          borderColor: "#191e29", borderWidth: 2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, cutout: "62%",
+        plugins: { legend: { display: false } },
+      },
+    });
+  }
+  $("d-legend").innerHTML = groups.map(([g, v]) =>
+    `<div><em style="background:${GROUP_HEX[GROUPS.indexOf(g)] || "#5c6480"}"></em>
+     <span>${g}</span><span class="${v < 0 ? "down" : ""}">${num(v)}%</span></div>`).join("")
+    + (groups.some(([, v]) => v < 0)
+       ? '<p class="faint" style="font-size:12px;margin:10px 0 0">Negatif kalem, fonun kaldıraç '
+         + 'için borçlandığı tutarı gösterir; toplam yine %100’dür.</p>' : "");
+  // The allocation pane is hidden while its chart is built, so Chart.js sizes it
+  // to 0 and draws nothing until it is measured again.
+  Object.values(charts).forEach((c) => c.resize());
+
+  loadKap(code);
+  loadHoldings(code, d.allocation);
+}
+
+// ---------------- item-level holdings (KAP PDF) ----------------
+// Keyed by the TEFAS allocation column, so an allocation row can open its own
+// constituents. Only sections whose extracted total agrees with TEFAS are
+// offered: the PDF's own section names do not map cleanly onto TEFAS categories.
+let drill = { code: null, bySection: {}, previous: null, keyToSection: {} };
+
+function drillable(key) {
+  const s = drill.bySection[drill.keyToSection[key]];
+  return s && s.items.length && s.match !== "eslesmedi" ? s : null;
+}
+
+function subTable(s) {
+  const cmp = drill.previous;
+  const head = `<tr><th class="l">Kalem</th><th class="l">Tanım</th><th>Değer ₺</th>
+    <th>Ağırlık %</th>${cmp ? "<th>Önceki %</th><th>Değişim</th>" : ""}</tr>`;
+  const body = s.items.map((h) => {
+    const badge = h.status === "yeni" ? '<span class="badge new">yeni</span>'
+      : h.status === "cikti" ? '<span class="badge out">çıktı</span>' : "";
+    return `<tr>
+      <td class="l"><span class="kod">${esc(h.code)}</span> ${badge}</td>
+      <td class="l name faint" title="${esc(h.issuer || h.isin)}"
+        >${esc(h.issuer) || `<span class="num">${esc(h.isin) || "—"}</span>`}</td>
+      <td class="num muted">${h.value ? compact(h.value) : "—"}</td>
+      <td class="num">${h.status === "cikti" ? "—" : num(h.weight_pct)}</td>
+      ${cmp ? `<td class="num muted">${h.prev_weight_pct == null ? "—" : num(h.prev_weight_pct)}</td>
+               <td class="num ${cls(h.delta)}">${h.delta == null ? "—" : pct(h.delta)}</td>` : ""}
+    </tr>`;
+  }).join("");
+  const note = s.match === "kismi"
+    ? `<p class="faint" style="font-size:12px;margin:8px 0 0">Kısmi çıkarım: rapordan
+       %${num(s.extracted_pct)} okundu, TEFAS %${num(s.tefas_pct)} bildiriyor.</p>` : "";
+  return `<div class="subwrap"><table><thead>${head}</thead><tbody>${body}</tbody></table>${note}</div>`;
+}
+
+function renderAllocRows(allocation) {
+  const entries = Object.entries(allocation).sort((a, b) => b[1] - a[1]);
+  $("d-rows").innerHTML = entries.map(([k, v]) => {
+    const s = drillable(k);
+    return `<tr class="${s ? "drill" : "plain"}" data-key="${k}">
+      <td class="l">${allocLabel(k)}${s ? `<span class="faint" style="font-size:11px">
+        · ${s.items.length} kalem</span>` : ""}</td>
+      <td class="num ${v < 0 ? "down" : ""}">${num(v)}</td></tr>`;
+  }).join("") || '<tr><td colspan="2" class="faint l">Kalem bazlı dağılım yok.</td></tr>';
+}
+
+$("d-rows").onclick = (e) => {
+  const tr = e.target.closest("tr.drill");
+  if (!tr) return;
+  const open = tr.nextElementSibling?.classList.contains("sub");
+  tr.parentElement.querySelectorAll("tr.sub").forEach((x) => x.remove());
+  tr.parentElement.querySelectorAll("tr.drill").forEach((x) => x.classList.remove("open"));
+  if (open) return;
+  tr.classList.add("open");
+  tr.insertAdjacentHTML("afterend",
+    `<tr class="sub"><td colspan="2">${subTable(drillable(tr.dataset.key))}</td></tr>`);
+};
+
+async function loadHoldings(code, allocation) {
+  drill = { code, bySection: {}, previous: null, keyToSection: {} };
+  renderAllocRows(allocation);
+  let d;
+  try { d = await api(`/funds/${code}/holdings`); }
+  catch { return; }
+
+  drill = { code, bySection: d.sections, previous: d.previous_report,
+            keyToSection: d.key_to_section };
+  renderAllocRows(allocation);
+
+  const extractable = Object.keys(d.tefas_sections).length > 0;
+  if (d.reports.length) {
+    const n = Object.values(d.sections).reduce((t, s) => t + s.items.length, 0);
+    $("d-extractbar").innerHTML = `<p class="faint num" style="font-size:12px;margin:0">
+      KAP raporu ${d.current_report} · ${n} kalem${d.previous_report
+        ? ` · ${d.previous_report} ile kıyaslanıyor` : " · kıyas için ikinci rapor yok"}
+      </p><p class="faint" style="font-size:12px;margin:6px 0 0">
+      Yanında ▸ olan satırlara tıklayıp kalemleri görebilirsiniz.</p>`;
+    return;
+  }
+  if (!extractable) { $("d-extractbar").innerHTML = ""; return; }
+  $("d-extractbar").innerHTML = `<div class="note">Bu varlıkların <b>hangi kalemler</b>
+    olduğu TEFAS'ta yok; yalnızca KAP'ın aylık portföy dağılım raporunda bulunuyor.</div>
+    <button class="btn primary" id="d-extract">KAP raporundan çıkar</button>
+    <span class="faint" id="d-exmsg" style="margin-left:10px"></span>`;
+  $("d-extract").onclick = async () => {
+    $("d-extract").disabled = true;
+    $("d-exmsg").textContent = "Son iki rapor indiriliyor ve ayrıştırılıyor… (20-40 sn)";
+    try {
+      await api(`/funds/${code}/holdings`, { method: "POST" });
+      loadHoldings(code, allocation);
+    } catch (e) {
+      $("d-exmsg").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+      $("d-extract").disabled = false;
+      $("d-extract").textContent = "Tekrar dene";
+    }
+  };
+}
+
+async function loadKap(code) {
+  $("d-kaplist").innerHTML = '<p class="faint">Yükleniyor…</p>';
+  try {
+    const { disclosures } = await api(`/funds/${code}/kap`);
+    if (!disclosures.length) {
+      $("d-kaplist").innerHTML =
+        '<p class="faint">Bu fona ait, önbellekteki dönemde KAP bildirimi yok.</p>';
+      return;
+    }
+    $("d-kaplist").innerHTML = disclosures.map((x) => {
+      const isPortfolio = (x.subject || "").startsWith("Portföy Dağılım");
+      return `<div class="discl">
+        <a href="${x.url}" target="_blank" rel="noopener noreferrer">${esc(x.subject || "Bildirim")}</a>
+        ${isPortfolio ? '<span class="tag">portföy detayı</span>' : ""}
+        <p>${x.publish_date.slice(0, 16)}${x.summary ? " · " + esc(x.summary.trim().slice(0, 120)) : ""}</p>
+        ${x.attachment_count ? `<p><button class="btn ghost" data-att="${x.disclosure_index}"
+           style="padding:3px 8px;font-size:12px">Ek dosyalar (${x.attachment_count})</button></p>` : ""}
+      </div>`;
+    }).join("");
+  } catch (e) { $("d-kaplist").innerHTML = `<p class="down">${esc(e.message)}</p>`; }
+}
+
+$("d-kaplist").onclick = async (e) => {
+  const b = e.target.closest("button[data-att]");
+  if (!b) return;
+  b.disabled = true;
+  b.textContent = "Yükleniyor…";
+  try {
+    const { attachments } = await api(`/kap/${b.dataset.att}/attachments`);
+    b.outerHTML = attachments.length
+      ? attachments.map((a) => `<a href="${a.url}" target="_blank" rel="noopener noreferrer"
+          style="color:var(--accent);font-size:12px;display:block">↓ ${esc(a.file_name)}</a>`).join("")
+      : '<span class="faint" style="font-size:12px">Ek bulunamadı.</span>';
+  } catch (err) {
+    b.disabled = false;
+    b.textContent = "Tekrar dene";
+    b.insertAdjacentHTML("afterend", `<span class="down" style="font-size:12px"> ${esc(err.message)}</span>`);
+  }
+};
+
+// ---------------- compare ----------------
+let picked = [];
+
+$("c-pick").onclick = async () => {
+  if (!funds.length) await loadFunds();
+  $("picker").hidden = false;
+  $("pk-q").value = "";
+  renderPicker();
+  $("pk-q").focus();
+};
+$("pk-cancel").onclick = () => { $("picker").hidden = true; };
+$("pk-q").oninput = renderPicker;
+
+function renderPicker() {
+  const q = $("pk-q").value.trim().toUpperCase();
+  const hits = funds.filter((f) =>
+    !q || f.fund_code.includes(q) || f.fund_name.toUpperCase().includes(q));
+  $("pk-count").textContent = `${hits.length} fon`;
+  // Cap the DOM: 2400 rows with checkboxes janks the panel open.
+  $("pk-list").innerHTML = hits.slice(0, 300).map((f) => `<label>
+    <input type="checkbox" value="${f.fund_code}" ${picked.includes(f.fund_code) ? "checked" : ""}>
+    <span class="kod">${f.fund_code}</span>
+    <span class="name" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+      >${esc(f.fund_name)}</span>
+    <span class="num ${cls(f.return_pct)}">${pct(f.return_pct)}</span></label>`).join("")
+    + (hits.length > 300 ? '<p class="faint" style="padding:12px 18px">İlk 300 sonuç gösteriliyor — aramayı daraltın.</p>' : "");
+  updateSel();
+}
+
+$("pk-list").onchange = (e) => {
+  const cb = e.target;
+  if (cb.checked) {
+    if (picked.length >= 10) { cb.checked = false; return; }
+    picked.push(cb.value);
+  } else picked = picked.filter((c) => c !== cb.value);
+  updateSel();
+};
+const updateSel = () => { $("pk-sel").textContent = `${picked.length}/10 seçili`; };
+
+$("pk-ok").onclick = () => { $("picker").hidden = true; drawCompare(); };
+$("c-chips").onclick = (e) => {
+  const b = e.target.closest("button[data-code]");
+  if (!b) return;
+  picked = picked.filter((c) => c !== b.dataset.code);
+  drawCompare();
+};
+["c-start", "c-end"].forEach((id) => $(id).onchange = () => picked.length && drawCompare());
+
+async function drawCompare() {
+  $("c-chips").innerHTML = picked.map((c) =>
+    `<button data-code="${c}" title="Çıkar">${c} ×</button>`).join("");
+  if (!picked.length) {
+    charts["c-chart"]?.destroy();
+    delete charts["c-chart"];
+    $("c-rows").innerHTML = "";
+    $("c-empty").hidden = false;
+    $("c-empty").textContent = "Karşılaştırmak için “Fon seç”e basın.";
+    return;
+  }
+  $("c-empty").hidden = true;
+  try {
+    const d = await api(`/compare?codes=${picked.join(",")}` +
+      `&start=${$("c-start").value}&end=${$("c-end").value}`);
+    const dates = [...new Set(d.funds.flatMap((f) => f.series.map((p) => p.date)))].sort();
+    line("c-chart", dates, d.funds.map((f) => {
+      const by = Object.fromEntries(f.series.map((p) => [p.date, p.value]));
+      return { label: f.fund_code, data: dates.map((dt) => by[dt] ?? null), spanGaps: true };
+    }), "başlangıç = 100");
+    const byCode = Object.fromEntries(funds.map((f) => [f.fund_code, f.fund_name]));
+    $("c-rows").innerHTML = d.funds.map((f) => `<tr>
+      <td class="l"><span class="kod">${f.fund_code}</span></td>
+      <td class="l name">${esc(byCode[f.fund_code] || "")}</td>${cell(f.return_pct)}</tr>`).join("");
+    if (d.missing.length) {
+      $("c-empty").hidden = false;
+      $("c-empty").innerHTML = `Bu dönemde veri yok: <b>${d.missing.join(", ")}</b>`;
+    }
+  } catch (e) {
+    $("c-empty").hidden = false;
+    $("c-empty").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+  }
+}
+
+// ---------------- portfolio ----------------
+$("p-form").onsubmit = async (e) => {
+  e.preventDefault();
+  $("p-msg").textContent = "";
+  try {
+    await api("/positions", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fund_code: $("p-code").value, units: +$("p-units").value,
+        buy_date: $("p-date").value, buy_price: +$("p-price").value,
+        note: $("p-note").value || null,
+      }),
+    });
+    e.target.reset();
+    loadPortfolio();
+  } catch (err) { $("p-msg").textContent = err.message; }
+};
+
+async function loadPortfolio() {
+  const d = await api("/positions");
+  $("p-kpi").innerHTML = `
+    <div><small>Maliyet</small><b>${num(d.total_cost)} ₺</b></div>
+    <div><small>Güncel değer</small><b>${num(d.total_value)} ₺</b></div>
+    <div><small>Kar / zarar</small><b class="${cls(d.total_profit)}">${num(d.total_profit)} ₺</b></div>
+    <div><small>Getiri</small><b class="${cls(d.total_profit_pct)}">${pct(d.total_profit_pct)}</b></div>`;
+  $("p-rows").innerHTML = d.positions.map((p) => `<tr>
+    <td class="l"><span class="kod">${p.fund_code}</span></td>
+    <td class="l name" title="${esc(p.fund_name || "")}">${esc(p.fund_name || "—")}</td>
+    <td class="num">${num(p.units, 4)}</td><td class="num">${num(p.buy_price, 6)}</td>
+    <td class="num">${num(p.last_price, 6)}</td><td class="num">${num(p.cost)}</td>
+    <td class="num">${num(p.value)}</td>
+    <td class="num ${cls(p.profit)}">${num(p.profit)}</td>${cell(p.profit_pct)}
+    <td><button class="btn ghost" data-del="${p.id}" style="padding:3px 8px;font-size:12px">Sil</button></td>
+    </tr>`).join("");
+  $("p-empty").hidden = d.positions.length > 0;
+}
+$("p-rows").onclick = async (e) => {
+  const b = e.target.closest("button[data-del]");
+  if (b && confirm("Pozisyon silinsin mi?")) {
+    await api(`/positions/${b.dataset.del}`, { method: "DELETE" });
+    loadPortfolio();
+  }
+};
+
+// ---------------- init ----------------
+(async () => {
+  // Dönem alanları piyasadaki son veri gününe göre kurulmalı; bunun için status
+  // beklenir, yoksa 1A dönemi bugüne göre kurulup TEFAS'la kayıyor.
+  try { lastDataDate = (await api("/status")).last_date || lastDataDate; } catch { /* varsayılan */ }
+  applyPeriod(1);
+  $("c-end").value = lastDataDate;
+  $("c-start").value = monthsBack(lastDataDate, 3);
+  loadStatus();
+  await loadWatchlist();
+  loadFunds();
+})();

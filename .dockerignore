@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+# 140 MB'lik onbellek imaja girmemeli, volume'de duruyor
+*.db
+*.db-wal
+*.db-shm
+.git/
+.claude/
+.DS_Store
+README.md

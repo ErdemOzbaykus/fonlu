@@ -1,0 +1,25 @@
+services:
+  fonlu:
+    build: .
+    container_name: fonlu
+    # Docker Desktop yeniden baslatildiginda site kendiliginden geri gelsin.
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - fonlu-data:/data
+      # static/ bind mount edilince frontend duzenlemeleri yeniden build
+      # gerektirmiyor (sunucu zaten Cache-Control: no-cache gonderiyor).
+      - ./static:/app/static:ro
+    # 'docker compose ps' konteynerin ayakta olmasini degil, sitenin gercekten
+    # cevap verdigini gostersin. slim imajda curl yok, urllib yeterli.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/status')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  fonlu-data:

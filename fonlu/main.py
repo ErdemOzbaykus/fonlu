@@ -1,0 +1,648 @@
+"""Fonlu API. TEFAS reads are served from the SQLite cache; only /api/refresh
+talks to TEFAS, and it does so in the background."""
+
+import calendar
+import json
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Annotated, Literal, Optional
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
+from pytefas import TefasAPIError, TefasInvalidParameterError, TefasRateLimitError
+
+from . import holdings, kap, store
+
+app = FastAPI(title="Fonlu API")
+STATIC = Path(__file__).resolve().parent.parent / "static"
+
+refresh_state = {"running": False, "log": [], "error": None}
+
+# Onbellek bir donemin baslangicina tam yetismedginde bu kadar gunluk sapma
+# donemi gecersiz saymaz (hafta sonu / tatil).
+GRACE_DAYS = 7
+
+
+def _months_back(d: date, months: int) -> date:
+    """'1 ay once' = onceki ayin ayni gunu, 30 takvim gunu degil.
+
+    TEFAS donemleri takvim ayi olarak hesapliyor; 30 gun geriye gitmek ozellikle
+    31 gunluk aylarda ankoru kaydirip getiriyi yanlis gosteriyordu.
+    """
+    total = d.year * 12 + (d.month - 1) - months
+    year, month = divmod(total, 12)
+    month += 1
+    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
+
+
+def db():
+    conn = store.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+Db = Annotated[store.sqlite3.Connection, Depends(db)]
+
+
+@app.exception_handler(TefasRateLimitError)
+def _rate_limit(request, exc):
+    return JSONResponse({"detail": "TEFAS hiz limiti asildi, birazdan tekrar deneyin."}, 429)
+
+
+@app.exception_handler(TefasInvalidParameterError)
+def _bad_param(request, exc):
+    return JSONResponse({"detail": f"Gecersiz TEFAS parametresi: {exc}"}, 400)
+
+
+@app.exception_handler(TefasAPIError)
+def _api_error(request, exc):
+    return JSONResponse({"detail": f"TEFAS su an yanit vermiyor: {exc}"}, 502)
+
+
+def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
+    end = end or date.today().isoformat()
+    start = start or (date.fromisoformat(end) - timedelta(days=30)).isoformat()
+    if start > end:
+        raise HTTPException(400, "Baslangic tarihi bitisten sonra olamaz.")
+    return start, end
+
+
+@app.get("/api/status")
+def status(conn: Db):
+    n = conn.execute("SELECT COUNT(*) c FROM prices").fetchone()["c"]
+    funds = conn.execute("SELECT COUNT(DISTINCT fund_code) c FROM prices").fetchone()["c"]
+    return {
+        "rows": n,
+        "funds": funds,
+        "kap": conn.execute("SELECT COUNT(*) c FROM kap_disclosures").fetchone()["c"],
+        "last_date": store.last_cached_date(conn),
+        "refresh": refresh_state,
+    }
+
+
+@app.post("/api/refresh")
+def refresh(tasks: BackgroundTasks, days: Optional[int] = Query(None, ge=1, le=730)):
+    if refresh_state["running"]:
+        raise HTTPException(409, "Guncelleme zaten calisiyor.")
+
+    def job():
+        refresh_state.update(running=True, log=[], error=None)
+        try:
+            # ponytail: own connection because the request-scoped one is closed
+            # by then; single-user app, so no write contention to worry about.
+            store.sync(days=days, conn=store.connect(), log=refresh_state["log"].append)
+        except Exception as exc:  # surfaced through /api/status
+            refresh_state["error"] = str(exc)
+        finally:
+            refresh_state["running"] = False
+
+    tasks.add_task(job)
+    return {"status": "started"}
+
+
+@app.get("/api/funds")
+def list_funds(
+    conn: Db,
+    kind: Optional[Literal["YAT", "EMK", "BYF", "GYF", "GSYF"]] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+    codes: Optional[str] = Query(None, description="Virgulle ayrilmis fon kodlari"),
+    category: Optional[str] = None,
+    min_return: Optional[float] = None,
+    max_return: Optional[float] = None,
+    min_size: Optional[float] = None,
+    limit: int = Query(3000, ge=1, le=5000),
+):
+    """Funds with their return over [start, end], best return first."""
+    start, end = _range(start, end)
+    # `codes` takip listesi gibi sabit bir kume icin: diger filtreler uygulanmaz,
+    # yoksa kaydedilen fon tarama filtresine takilip listeden dusuyor.
+    wanted = [c.strip().upper() for c in codes.split(",") if c.strip()] if codes else None
+    if wanted is not None and not wanted:
+        return {"start": start, "end": end, "count": 0,
+                "categories": CATEGORIES + ["Karma"], "funds": []}
+    if wanted:
+        # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
+        # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
+        kind = q = None
+    code_filter = (" AND fund_code IN (%s)" % ",".join("?" * len(wanted))) if wanted else ""
+    rows = conn.execute(
+        """
+        SELECT p.fund_code, p.kind, p.fund_name, p.last_price, p.first_price,
+               p.portfolio_size, p.investor_count, p.first_date, p.last_date, p.points,
+               b.allocation
+        FROM (
+            SELECT fund_code, kind, fund_name, portfolio_size, investor_count,
+                   price AS last_price, date AS last_date,
+                   FIRST_VALUE(price) OVER w AS first_price,
+                   FIRST_VALUE(date)  OVER w AS first_date,
+                   COUNT(*) OVER (PARTITION BY fund_code) AS points,
+                   ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) AS rn
+            FROM prices
+            WHERE date BETWEEN ? AND ?
+              AND (? IS NULL OR kind = ?)
+              AND (? IS NULL OR fund_code LIKE ? OR UPPER(fund_name) LIKE ?)
+              """ + code_filter + """
+            WINDOW w AS (PARTITION BY fund_code ORDER BY date
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+        ) p
+        LEFT JOIN breakdown b ON b.fund_code = p.fund_code
+        WHERE p.rn = 1
+        """,
+        (start, end, kind, kind, q, f"%{(q or '').upper()}%", f"%{(q or '').upper()}%",
+         *(wanted or [])),
+    ).fetchall()
+
+    # Donem getirisi, aralik ICINDEKI ilk fiyattan degil, baslangictan onceki son
+    # fiyattan hesaplanmali: 17 Mayis Pazar ise TEFAS 15 Mayis kapanisini esas alir,
+    # aralik icindeki ilk fiyati (18 Mayis) almak donemi kisaltip getiriyi bozuyor.
+    # Tatil bosluklari icin 15 gunluk pencere yetiyor.
+    base = {r["fund_code"]: r for r in conn.execute(
+        """SELECT fund_code, price, date FROM (
+             SELECT fund_code, price, date,
+                    ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
+             FROM prices WHERE date BETWEEN date(?, '-15 days') AND ?)
+           WHERE rn = 1""", (start, start))}
+
+    out = []
+    for r in rows:
+        # Fonun aralik oncesi fiyati yoksa (yeni ihrac) aralik ici ilk fiyat kalir.
+        anchor = base.get(r["fund_code"])
+        first_price = anchor["price"] if anchor else r["first_price"]
+        first_date = anchor["date"] if anchor else r["first_date"]
+        ret = _pct(first_price, r["last_price"])
+        groups = _groups(json.loads(r["allocation"]) if r["allocation"] else {})
+        cat = _category(groups)
+        if not wanted:  # sabit kume istendiginde tarama filtreleri uygulanmaz
+            if min_return is not None and (ret is None or ret < min_return):
+                continue
+            if max_return is not None and (ret is None or ret > max_return):
+                continue
+            if min_size is not None and (r["portfolio_size"] or 0) < min_size:
+                continue
+            if category and cat != category:
+                continue
+        fund = {k: r[k] for k in r.keys() if k != "allocation"}
+        out.append({**fund, "first_price": first_price, "first_date": first_date,
+                    "return_pct": ret, "category": cat, "groups": groups})
+    out.sort(key=lambda f: (f["return_pct"] is None, -(f["return_pct"] or 0)))
+    return {"start": start, "end": end, "count": len(out),
+            "categories": CATEGORIES + ["Karma"], "funds": out[:limit]}
+
+
+def _pct(first, last):
+    if not first or last is None:
+        return None
+    return round((last / first - 1) * 100, 2)
+
+
+def _risk(prices: list[float]) -> dict:
+    """Annualised volatility and worst peak-to-trough drop over the series.
+
+    ponytail: plain sample stddev of daily returns x sqrt(252). Enough to rank
+    funds against each other; not a substitute for TEFAS's official risk grade,
+    which pytefas does not expose.
+    """
+    rets = [b / a - 1 for a, b in zip(prices, prices[1:]) if a]
+    if len(rets) < 5:
+        return {"volatility_pct": None, "max_drawdown_pct": None}
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    peak, mdd = prices[0], 0.0
+    for p in prices:
+        peak = max(peak, p)
+        if peak:
+            mdd = min(mdd, p / peak - 1)
+    return {
+        "volatility_pct": round(var**0.5 * (252**0.5) * 100, 2),
+        "max_drawdown_pct": round(mdd * 100, 2),
+    }
+
+
+# Coarse buckets so a fund can be filtered by what it actually holds. TEFAS
+# encodes this in the fund title; deriving it from the breakdown is more honest.
+CATEGORY_RULES = [
+    ("Hisse Senedi", ("stock_pct", "foreign_stock_pct")),
+    ("Kıymetli Maden", ("precious_metals_pct", "precious_metals_etf_pct",
+                        "precious_metals_government_debt_pct", "deposit_gold_pct")),
+    ("Para Piyasası", ("repo_pct", "reverse_repo_pct", "takasbank_money_market_pct",
+                       "bist_money_market_pct", "term_deposit_pct", "deposit_tl_pct",
+                       "participation_account_tl_pct")),
+    ("Borçlanma Aracı", ("government_bond_pct", "treasury_bill_pct", "private_sector_bond_pct",
+                         "financing_bill_pct", "bank_bill_pct", "eurobond_pct",
+                         "asset_backed_securities_pct", "government_lease_certificate_tl_pct")),
+    ("Döviz", ("deposit_fx_pct", "fx_payable_bond_pct", "fx_payable_bill_pct",
+               "government_external_debt_pct", "private_sector_external_debt_pct")),
+    ("Fon Sepeti", ("investment_fund_pct", "etf_pct", "fund_participation_certificate_pct",
+                    "foreign_etf_pct")),
+]
+CATEGORIES = [name for name, _ in CATEGORY_RULES]
+
+
+def _groups(allocation: dict) -> dict:
+    """54 pct columns collapsed to the 6 buckets, plus whatever is left over."""
+    if not allocation:
+        return {}
+    out = {n: round(sum(allocation.get(k, 0) for k in keys), 2) for n, keys in CATEGORY_RULES}
+    out["Diğer"] = round(max(0.0, sum(allocation.values()) - sum(out.values())), 2)
+    # Keep negatives: a leveraged fund reports a short money-market leg (e.g.
+    # +123.7 stock / -23.7 BIST money market) and dropping it hides the leverage.
+    return {k: v for k, v in out.items() if v}
+
+
+def _category(groups: dict) -> Optional[str]:
+    if not groups:
+        return None
+    best = max(groups, key=groups.get)
+    return best if groups[best] >= 25 else "Karma"
+
+
+@app.get("/api/funds/{code}")
+def fund_detail(code: str, conn: Db, start: Optional[str] = None, end: Optional[str] = None):
+    code = code.upper()
+    start, end = _range(start, end)
+    series = conn.execute(
+        "SELECT date, price FROM prices WHERE fund_code = ? AND date BETWEEN ? AND ? ORDER BY date",
+        (code, start, end),
+    ).fetchall()
+    if not series:
+        raise HTTPException(404, f"{code} icin onbellekte veri yok. Once /api/refresh calistirin.")
+    meta = conn.execute(
+        "SELECT fund_name, kind, portfolio_size, investor_count, price, date"
+        " FROM prices WHERE fund_code = ? ORDER BY date DESC LIMIT 1",
+        (code,),
+    ).fetchone()
+    bd = conn.execute("SELECT date, allocation FROM breakdown WHERE fund_code = ?", (code,)).fetchone()
+    alloc = json.loads(bd["allocation"]) if bd else {}
+
+    # Period returns over whatever the cache holds, independent of the chosen range.
+    hist = conn.execute(
+        "SELECT date, price FROM prices WHERE fund_code = ? ORDER BY date", (code,)
+    ).fetchall()
+    prices = [r["price"] for r in hist if r["price"]]
+    last = hist[-1]["price"]
+    periods = {}
+    last_date = date.fromisoformat(hist[-1]["date"])
+    first_date = date.fromisoformat(hist[0]["date"])
+    for label, months in (("1A", 1), ("3A", 3), ("6A", 6), ("1Y", 12)):
+        target = _months_back(last_date, months)
+        # TEFAS'in yaptigi gibi hedef tarihteki ya da ONCESINDEKI son fiyata
+        # bagla; hedef hafta sonuna denk gelirse bir sonraki islem gunune atlamak
+        # donemi kisaltip getiriyi yukseltiyor.
+        prior = [r for r in hist if r["date"] <= target.isoformat()]
+        if prior:
+            periods[label] = _pct(prior[-1]["price"], last)
+        elif first_date <= target + timedelta(days=GRACE_DAYS):
+            # Onbellek tam o gune yetismiyor ama birkac gun icinde basliyor.
+            periods[label] = _pct(hist[0]["price"], last)
+        else:
+            periods[label] = None
+
+    return {
+        "fund_code": code,
+        **dict(meta),
+        "return_pct": _pct(series[0]["price"], series[-1]["price"]),
+        "series": [dict(r) for r in series],
+        "allocation": alloc,
+        "allocation_date": bd["date"] if bd else None,
+        "groups": _groups(alloc),
+        "category": _category(_groups(alloc)),
+        "periods": periods,
+        **_risk(prices),
+        "kap_count": conn.execute(
+            "SELECT COUNT(*) c FROM kap_disclosures WHERE fund_code = ?", (code,)
+        ).fetchone()["c"],
+    }
+
+
+@app.get("/api/funds/{code}/kap")
+def fund_kap(code: str, conn: Db, limit: int = Query(50, ge=1, le=200)):
+    """Fonun KAP bildirimleri (onbellekten). Detayli portfoy kirilimi 'Portfoy
+    Dagilim Raporu' bildirimlerinin PDF ekinde bulunur."""
+    rows = conn.execute(
+        "SELECT * FROM kap_disclosures WHERE fund_code = ? ORDER BY publish_date DESC LIMIT ?",
+        (code.upper(), limit),
+    ).fetchall()
+    return {
+        "fund_code": code.upper(),
+        "disclosures": [
+            {**dict(r), "url": kap.DISCLOSURE_URL.format(r["disclosure_index"])} for r in rows
+        ],
+    }
+
+
+@app.get("/api/kap/{disclosure_index}/attachments")
+def kap_attachments(disclosure_index: int):
+    """Bir bildirimin PDF ekleri. KAP'a canli gider, sadece tiklaninca cagrilir."""
+    try:
+        atts = kap.attachments(disclosure_index)
+    except kap.KapError as exc:
+        raise HTTPException(502, str(exc))
+    # KAP'in kendi linki PDF'i Java-serialize sarmalayici icinde donduruyor, o
+    # yuzden dosyayi kendi ucumuzden gecirip temiz PDF veriyoruz.
+    return {"attachments": [
+        {**a, "url": f"/api/kap/file/{a['obj_id']}"} for a in atts
+    ]}
+
+
+@app.get("/api/kap/file/{obj_id}")
+def kap_file(obj_id: str):
+    """KAP ekini temiz PDF olarak servis eder."""
+    if not obj_id.isalnum():
+        raise HTTPException(400, "Gecersiz dosya kimligi.")
+    try:
+        pdf = holdings.fetch_pdf(obj_id)
+    except kap.KapError as exc:
+        raise HTTPException(502, str(exc))
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{obj_id}.pdf"'})
+
+
+def _section_totals(alloc: dict) -> dict:
+    """TEFAS dagilim sutunlarini PDF bolum anahtarlarina toplar."""
+    out = {}
+    for key, value in alloc.items():
+        if section := holdings.TEFAS_TO_SECTION.get(key):
+            out[section] = round(out.get(section, 0) + value, 2)
+    return out
+
+
+def _match(tefas_pct: float, extracted_pct: float) -> str:
+    """Cikarimin TEFAS'la tutarliligi.
+
+    PDF bolum adlari TEFAS kategorileriyle birebir ortusmuyor (bir raporda
+    'KIRA SERTIFIKALARI' basligi altinda duran kalem TEFAS'ta mevduat sayilabiliyor),
+    bu yuzden bir bolum ancak sayilar tuttugunda kalem detayi olarak sunuluyor.
+    """
+    if not extracted_pct:
+        return "yok"
+    if not tefas_pct:
+        return "eslesmedi"
+    diff = abs(extracted_pct - tefas_pct)
+    if diff <= max(3.0, abs(tefas_pct) * 0.15):
+        return "tam"
+    if abs(extracted_pct) < abs(tefas_pct):
+        return "kismi"
+    return "eslesmedi"
+
+
+@app.get("/api/funds/{code}/holdings")
+def fund_holdings(code: str, conn: Db):
+    """Fonun kalem bazli portfoyu, varlik sinifina gore gruplanmis.
+
+    Her bolum icin TEFAS'in bildirdigi yuzde ile cikarilan yuzde birlikte
+    donuyor; arayuz bir dagilim satirini ancak ikisi tutuyorsa detaya aciyor.
+    Iki rapor varsa kalemler bir onceki ayla kiyaslanip `delta`/`status`
+    aliyor -- varlik yeni mi girdi, cikti mi, agirligi degisti mi.
+    """
+    code = code.upper()
+    dates = [r["report_date"] for r in conn.execute(
+        "SELECT DISTINCT report_date FROM holdings WHERE fund_code = ?"
+        " ORDER BY report_date DESC LIMIT 2", (code,)).fetchall()]
+    bd = conn.execute("SELECT allocation FROM breakdown WHERE fund_code = ?", (code,)).fetchone()
+    tefas = _section_totals(json.loads(bd["allocation"]) if bd else {})
+    if not dates:
+        return {"fund_code": code, "reports": [], "sections": {},
+                "tefas_sections": tefas, "labels": holdings.SECTION_LABELS,
+                "key_to_section": holdings.TEFAS_TO_SECTION}
+
+    current, previous = dates[0], (dates[1] if len(dates) > 1 else None)
+    rows = conn.execute(
+        "SELECT section, code, isin, issuer, value, weight_pct FROM holdings"
+        " WHERE fund_code = ? AND report_date = ? ORDER BY weight_pct DESC",
+        (code, current)).fetchall()
+    prev = {(r["section"], r["code"]): r["weight_pct"] for r in conn.execute(
+        "SELECT section, code, weight_pct FROM holdings WHERE fund_code = ? AND report_date = ?",
+        (code, previous or ""))}
+
+    sections: dict[str, dict] = {}
+    for r in rows:
+        item = dict(r)
+        was = prev.pop((r["section"], r["code"]), None)
+        item["prev_weight_pct"] = was
+        item["delta"] = None if was is None else round(r["weight_pct"] - was, 2)
+        item["status"] = "yeni" if previous and was is None else "mevcut"
+        sections.setdefault(r["section"], {"items": []})["items"].append(item)
+
+    # Gecen ay olup bu ay portfoyde olmayan kalemler de gorunsun.
+    for (section, item_code), was in prev.items():
+        sections.setdefault(section, {"items": []})["items"].append({
+            "section": section, "code": item_code, "isin": "", "issuer": "",
+            "value": 0.0, "weight_pct": 0.0, "prev_weight_pct": was,
+            "delta": round(-was, 2), "status": "cikti",
+        })
+
+    for section, data in sections.items():
+        extracted = round(sum(i["weight_pct"] for i in data["items"]), 2)
+        data["extracted_pct"] = extracted
+        data["tefas_pct"] = tefas.get(section)
+        data["match"] = _match(tefas.get(section, 0), extracted)
+        data["label"] = holdings.SECTION_LABELS.get(section, section)
+        data["items"].sort(key=lambda i: -i["weight_pct"])
+
+    return {
+        "fund_code": code,
+        "reports": dates,
+        "current_report": current,
+        "previous_report": previous,
+        "sections": sections,
+        "tefas_sections": tefas,
+        "labels": holdings.SECTION_LABELS,
+        # Arayuz hangi dagilim satirinin hangi bolume actigini bilsin.
+        "key_to_section": holdings.TEFAS_TO_SECTION,
+    }
+
+
+@app.post("/api/funds/{code}/holdings")
+def extract_holdings(code: str, conn: Db):
+    """Son iki 'Portfoy Dagilim Raporu' PDF'ini indirip kalemleri cikarir.
+
+    Iki rapor cekiliyor cunku ay bazli kiyas (varlik yeni mi, agirligi degisti mi)
+    ancak onceki ayin raporu elde varsa yapilabiliyor. Senkron calisir (20-40 sn):
+    kullanicinin bilerek tetikledigi tek fonluk bir islem.
+    """
+    code = code.upper()
+    reports = conn.execute(
+        "SELECT disclosure_index, publish_date FROM kap_disclosures"
+        " WHERE fund_code = ? AND subject LIKE 'Portföy Dağılım%' AND attachment_count > 0"
+        " ORDER BY publish_date DESC LIMIT 2", (code,)
+    ).fetchall()
+    if not reports:
+        raise HTTPException(404, f"{code} icin ekli bir KAP portfoy dagilim raporu yok.")
+
+    stored = 0
+    for report in reports:
+        report_date = report["publish_date"][:10]
+        try:
+            atts = kap.attachments(report["disclosure_index"])
+            parsed = holdings.parse(holdings.fetch_pdf(atts[0]["obj_id"])) if atts else []
+        except kap.KapError as exc:
+            # Onceki ay okunamazsa kiyas kaybolur ama guncel rapor yine degerli.
+            if report is reports[0]:
+                raise HTTPException(502, str(exc))
+            break
+        conn.execute("DELETE FROM holdings WHERE fund_code = ? AND report_date = ?",
+                     (code, report_date))
+        conn.executemany(
+            "INSERT INTO holdings VALUES (?,?,?,?,?,?,?,?,?)",
+            [(code, report_date, h["section"], h["code"], h["isin"], h["issuer"],
+              h["value"], h["weight_pct"], report["disclosure_index"]) for h in parsed],
+        )
+        stored += len(parsed)
+    conn.commit()
+
+    if not stored:
+        raise HTTPException(
+            422,
+            "Rapor okundu ama kalem çıkarılamadı — bu kurucunun PDF düzeni "
+            "destekleniyor değil. Raporu KAP'tan açıp inceleyebilirsiniz.",
+        )
+    return fund_holdings(code, conn)
+
+
+@app.get("/api/watchlist")
+def get_watchlist(conn: Db):
+    rows = conn.execute("SELECT fund_code FROM watchlist ORDER BY added_at DESC").fetchall()
+    return {"codes": [r["fund_code"] for r in rows]}
+
+
+@app.put("/api/watchlist/{code}", status_code=204)
+def add_watch(code: str, conn: Db):
+    code = code.upper()
+    if not code.isalnum() or len(code) > 10:
+        raise HTTPException(400, "Gecersiz fon kodu.")
+    conn.execute("INSERT OR REPLACE INTO watchlist VALUES (?, datetime('now'))", (code,))
+    conn.commit()
+
+
+@app.delete("/api/watchlist/{code}", status_code=204)
+def remove_watch(code: str, conn: Db):
+    conn.execute("DELETE FROM watchlist WHERE fund_code = ?", (code.upper(),))
+    conn.commit()
+
+
+@app.get("/api/compare")
+def compare(
+    conn: Db,
+    codes: str = Query(..., description="Virgulle ayrilmis fon kodlari"),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """Each fund indexed to 100 at its first price in the range."""
+    wanted = [c.strip().upper() for c in codes.split(",") if c.strip()][:10]
+    if not wanted:
+        raise HTTPException(400, "En az bir fon kodu verin.")
+    start, end = _range(start, end)
+    result, missing = [], []
+    for code in wanted:
+        rows = conn.execute(
+            "SELECT date, price FROM prices WHERE fund_code = ? AND date BETWEEN ? AND ? ORDER BY date",
+            (code, start, end),
+        ).fetchall()
+        if not rows or not rows[0]["price"]:
+            missing.append(code)
+            continue
+        base = rows[0]["price"]
+        result.append({
+            "fund_code": code,
+            "return_pct": _pct(base, rows[-1]["price"]),
+            "series": [{"date": r["date"], "value": round(r["price"] / base * 100, 3)} for r in rows],
+        })
+    return {"start": start, "end": end, "funds": result, "missing": missing}
+
+
+class PositionIn(BaseModel):
+    fund_code: str = Field(min_length=2, max_length=10)
+    units: float = Field(gt=0)
+    buy_date: date
+    buy_price: float = Field(gt=0)
+    note: Optional[str] = Field(None, max_length=200)
+
+    @field_validator("fund_code")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v.isalnum():
+            raise ValueError("Fon kodu harf ve rakamlardan olusmali.")
+        return v
+
+
+@app.post("/api/positions", status_code=201)
+def add_position(pos: PositionIn, conn: Db):
+    # Bilinmeyen kod neredeyse her zaman yazim hatasi; kabul edilirse fiyati
+    # hesaplanamayan olu bir pozisyon olusuyor ve sessizce oyle kaliyor.
+    if not conn.execute("SELECT 1 FROM prices WHERE fund_code = ? LIMIT 1",
+                        (pos.fund_code,)).fetchone():
+        raise HTTPException(
+            404, f"{pos.fund_code} önbellekte yok. Kodu kontrol edin veya veriyi güncelleyin.")
+    cur = conn.execute(
+        "INSERT INTO positions (fund_code, units, buy_date, buy_price, note) VALUES (?,?,?,?,?)",
+        (pos.fund_code, pos.units, pos.buy_date.isoformat(), pos.buy_price, pos.note),
+    )
+    conn.commit()
+    return {"id": cur.lastrowid}
+
+
+@app.delete("/api/positions/{pos_id}", status_code=204)
+def delete_position(pos_id: int, conn: Db):
+    if not conn.execute("DELETE FROM positions WHERE id = ?", (pos_id,)).rowcount:
+        raise HTTPException(404, "Pozisyon bulunamadi.")
+    conn.commit()
+
+
+@app.get("/api/positions")
+def list_positions(conn: Db):
+    rows = conn.execute(
+        """
+        SELECT p.*, l.price AS last_price, l.date AS last_date, l.fund_name
+        FROM positions p
+        LEFT JOIN (
+            SELECT fund_code, fund_name, price, date FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
+                FROM prices
+            ) WHERE rn = 1
+        ) l ON l.fund_code = p.fund_code
+        ORDER BY p.fund_code, p.buy_date
+        """
+    ).fetchall()
+
+    positions, cost_sum, value_sum = [], 0.0, 0.0
+    for r in rows:
+        cost = r["units"] * r["buy_price"]
+        value = r["units"] * r["last_price"] if r["last_price"] else None
+        cost_sum += cost
+        if value is not None:
+            value_sum += value
+        positions.append({
+            **dict(r),
+            "cost": round(cost, 2),
+            "value": round(value, 2) if value is not None else None,
+            "profit": round(value - cost, 2) if value is not None else None,
+            "profit_pct": _pct(r["buy_price"], r["last_price"]),
+        })
+    return {
+        "positions": positions,
+        "total_cost": round(cost_sum, 2),
+        "total_value": round(value_sum, 2),
+        "total_profit": round(value_sum - cost_sum, 2),
+        "total_profit_pct": _pct(cost_sum, value_sum),
+    }
+
+
+class RevalidatingStatic(StaticFiles):
+    """Tarayici index.html/app.js'i yeniden dogrulamadan onbellekten servis edince
+    frontend duzenlemeleri gorunmuyor. 'no-cache' her istekte dogrulama zorunlu
+    kiliyor; ETag ayni kaldiginda dosya yine tekrar indirilmiyor."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/", RevalidatingStatic(directory=STATIC, html=True), name="static")
