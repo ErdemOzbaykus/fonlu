@@ -8,15 +8,16 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - fonlu-data:/data
       # static/ bind mount edilince frontend duzenlemeleri yeniden build
       # gerektirmiyor (sunucu zaten Cache-Control: no-cache gonderiyor).
       - ./static:/app/static:ro
     # 'docker compose ps' konteynerin ayakta olmasini degil, sitenin gercekten
     # cevap verdigini gostersin. slim imajda curl yok, urllib yeterli.
     healthcheck:
+      # /api/status artik auth istiyor; 401 de "sunucu ayakta" demek.
+      # urllib 401'de HTTPError firlatiyor, onu basari sayiyoruz.
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/status')"]
+             "import urllib.request as u,urllib.error as e\ntry: u.urlopen('http://localhost:8000/api/status')\nexcept e.HTTPError: pass"]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -48,6 +49,3 @@ services:
       # Testte sahte: JWT dogrulamasi override ediliyor, aga cikilmiyor.
       SUPABASE_URL: https://example.invalid
     command: python test_fonlu.py
-
-volumes:
-  fonlu-data:

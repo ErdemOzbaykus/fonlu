@@ -4,76 +4,30 @@ TEFAS fonlarını tarama/karşılaştırma, KAP bildirimleri ve kişisel portfö
 API-first: tüm veri `/api/*` üzerinden gelir, frontend sadece bir tüketici (ileride
 mobil de öyle olacak).
 
+Veri Supabase Postgres'te, hesaplar Supabase Auth'ta durur. Uygulama **yalnızca Docker'da**
+çalışır; host'ta Python kurulumu gerekmiyor.
+
 ## Kurulum
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Doğrulandı: Python 3.14 + pytefas 0.4.1. 365 günlük seed ≈ 25 dk (TEFAS rate limit'i
-dakikada 6 istek) + ≈ 8 dk (KAP); 595.731 fiyat satırı / 2.486 fon / 87.934 KAP bildirimi
-/ ~140 MB SQLite. 90 günlük seed ≈ 5 dk ve ~32 MB, ama 6A/1Y getirileri boş kalır.
-
-## Veriyi doldur (bir defalık seed)
-
-TEFAS dakikada 6 istek kabul ediyor ve 90 günlük çekim birkaç dakika sürüyor, o yüzden
-veri önce SQLite'a (`fonlu.db`) yazılır; API hiçbir zaman canlı TEFAS'ı beklemez.
+`.env.example`'ı kopyalayıp iki değeri doldurun:
 
 ```bash
-python -m fonlu.store --days 365
+cp .env.example .env
 ```
 
-`--days 90` daha hızlıdır ama fon detayındaki **6A ve 1Y getiri kutuları boş kalır** —
-o dönemin verisi hiç çekilmemiş olur. 1A/3A için 90 gün yeterlidir.
+| Değişken | Ne |
+|---|---|
+| `DATABASE_URL` | Supabase session pooler DSN'i, `fonlu_app` rolü ve şifresiyle |
+| `SUPABASE_URL` | Proje API URL'i; JWT doğrulaması bunun JWKS ucundan yapılır |
 
-Sonrasında günlük artımlı güncelleme (son kayıtlı tarihten bugüne):
+`.env` git'e girmez. Ardından:
 
 ```bash
-python -m fonlu.store
+docker compose up -d --build
 ```
 
-Cron örneği — hafta içi 20:00:
-`0 20 * * 1-5 cd /path/to/Fonlu && .venv/bin/python -m fonlu.store`
-
-Aynı işi arayüzdeki **Veriyi güncelle** düğmesi de yapar (`POST /api/refresh`); arka
-planda çalışır, ilerlemeyi sol alttaki durum satırı (`GET /api/status`) gösterir.
-
-Statik dosyalar `Cache-Control: no-cache` ile servis ediliyor — `static/` altını
-düzenlerken tarayıcı eski JS'i çalıştırmasın diye.
-
-## Çalıştır
-
-```bash
-uvicorn fonlu.main:app --reload
-```
-
-http://127.0.0.1:8000 → Fonlar / Karşılaştır / Portföy.
-
-## Docker
-
-```bash
-docker compose build
-```
-
-Test:
-
-```bash
-docker compose run --rm fonlu python test_fonlu.py
-```
-
-Seed (veri `fonlu-data` volume'üne yazılır, imaja değil):
-
-```bash
-docker compose run --rm fonlu python -m fonlu.store --days 365
-```
-
-Çalıştır — site doğrudan http://localhost:8000 adresinde açılır:
-
-```bash
-docker compose up -d
-```
+http://localhost:8000 → giriş ekranı. Kayıt olup giriş yapınca Fonlar / Karşılaştır /
+Portföy sekmeleri açılır. Bütün `/api/*` uçları giriş ister; token'sız istek `401` döner.
 
 Ayakta mı diye bakmak için (`healthy` yazması sitenin gerçekten cevap verdiği anlamına
 gelir, sadece konteynerin ayakta olduğu değil):
@@ -84,35 +38,56 @@ docker compose ps
 
 Durdurmak için `docker compose down`.
 
-Notlar:
+## Veriyi doldur ve güncelle
 
-- **Port 8000 çakışması:** yerelde `uvicorn` çalışıyorsa `compose up` "port is already
-  allocated" verir. Ya yerel sunucuyu durdurun ya da `docker-compose.yml`'de portu
-  `"8001:8000"` yapın.
-- `restart: unless-stopped` sayesinde Docker Desktop yeniden başladığında site kendiliğinden
-  geri gelir.
+TEFAS dakikada 6 istek kabul ediyor ve 90 günlük çekim birkaç dakika sürüyor, o yüzden
+veri önce önbelleğe yazılır; API hiçbir zaman canlı TEFAS'ı beklemez.
 
-- Veritabanı yolu `FONLU_DB` ile ayarlanıyor; imajda `/data/fonlu.db`, yerelde repo kökü.
-  Volume sayesinde `docker compose build` verinizi silmiyor.
-- Mevcut bir veritabanında `holdings` tablosu eski şemadaysa (rapor tarihi ve varlık
-  bölümü anahtarda değilken) açılışta otomatik düşürülüp yeniden oluşturuluyor. İçeriği
-  KAP'tan yeniden üretilebilen bir önbellek; `prices`, `positions` ve `watchlist`
-  etkilenmiyor.
-- `static/` read-only bind mount edilmiş, frontend düzenlemeleri yeniden build
-  gerektirmiyor. Python tarafını değiştirdiğinizde build gerekiyor.
-- Konteyner root olmayan `fonlu` kullanıcısıyla çalışıyor. İmaj ~544 MB (pandas + pdfplumber).
-- Doğrulandı: test suite, TEFAS seed, KAP çekimi ve PDF'ten hisse çıkarımı konteyner
-  içinde çalışıyor (`pdfplumber` için ek sistem paketi gerekmiyor).
+```bash
+docker compose exec fonlu python -m fonlu.store --days 90
+```
+
+`--days 365` fon detayındaki 6A ve 1Y getiri kutularını da doldurur ama ≈ 25 dk (TEFAS)
++ ≈ 8 dk (KAP) sürer. 90 gün 1A/3A için yeterlidir; **6A ve 1Y kutuları boş kalır** —
+o dönemin verisi hiç çekilmemiş olur.
+
+`--days` verilmezse son kayıtlı tarihten bugüne artımlı güncelleme yapılır:
+
+```bash
+docker compose exec fonlu python -m fonlu.store
+```
+
+Aynı işi arayüzdeki **Veriyi güncelle** düğmesi de yapar (`POST /api/refresh`); arka
+planda çalışır, ilerlemeyi sol alttaki durum satırı (`GET /api/status`) gösterir.
+Önbellek ortaktır: bir kullanıcının tetiklediği güncelleme herkese yarar. Kullanıcıya
+özel olan yalnızca watchlist ve pozisyonlardır.
 
 ## Self-check
 
 ```bash
-python test_fonlu.py
+docker compose --profile test run --rm tests
 ```
 
-Sabit fiyatlarla geçici bir DB kurup getiri hesabını, filtreleri (tip, sınıf, getiri,
-büyüklük), normalize karşılaştırmayı, türetilen varlık sınıfını, KAP join'ini ve portföy
-değerlemesini doğrular. TEFAS veya KAP'a istek atmaz.
+`test` profili yanına tek kullanımlık bir Postgres (`test-db`, tmpfs) kaldırır ve her
+koşum kendi geçici şemasında çalışır. Sabit fiyatlarla getiri hesabını, filtreleri (tip,
+sınıf, getiri, büyüklük), normalize karşılaştırmayı, türetilen varlık sınıfını, KAP
+join'ini, portföy değerlemesini ve kullanıcı izolasyonunu doğrular. TEFAS, KAP veya
+Supabase'e istek atmaz.
+
+## Notlar
+
+- **Port 8000 çakışması:** başka bir şey 8000'i tutuyorsa `compose up` "port is already
+  allocated" verir; `docker-compose.yml`'de portu `"8001:8000"` yapın.
+- `restart: unless-stopped` sayesinde Docker Desktop yeniden başladığında site kendiliğinden
+  geri gelir.
+- Adlandırılmış volume yok — tüm durum Supabase'de, imaj tamamen tek kullanımlık.
+  `docker compose down` veri kaybetmez.
+- `static/` read-only bind mount edilmiş, frontend düzenlemeleri yeniden build
+  gerektirmiyor; statik dosyalar `Cache-Control: no-cache` ile servis ediliyor. Python
+  tarafını değiştirdiğinizde build gerekiyor.
+- Konteyner root olmayan `fonlu` kullanıcısıyla çalışıyor. İmaj ~544 MB (pandas + pdfplumber).
+- Doğrulandı: test suite, TEFAS seed, KAP çekimi ve PDF'ten hisse çıkarımı konteyner
+  içinde çalışıyor (`pdfplumber` için ek sistem paketi gerekmiyor).
 
 ## Arayüz
 
@@ -167,7 +142,7 @@ Bildirimin JSON gövdesi boş bir XBRL formu, veri gerçekten PDF'in içinde.
   döndürüyor; içerik `%PDF-` ofsetinden sonra başlıyor. Uygulama dosyayı kendi
   `/api/kap/file/{objId}` ucundan geçirip temiz PDF veriyor (KAP'ın kendi linki tarayıcıda
   sarmalayıcıyı indiriyor).
-- Çıkarım talep üzerine çalışıyor (20-40 sn) ve sonuç SQLite'a yazılıyor; aynı PDF'e bir
+- Çıkarım talep üzerine çalışıyor (20-40 sn) ve sonuç önbelleğe yazılıyor; aynı PDF'e bir
   daha gidilmiyor. Toplu seed'e konmadı — binlerce PDF indirmek anlamsız.
 - **Son iki rapor** birlikte çekiliyor; ay bazlı kıyas ancak önceki ayın raporu da elde
   olursa yapılabiliyor.
@@ -260,11 +235,13 @@ METEN yeni girmiş, BETAE çıkmış, TUPRS 5,03 → 2,79 (−2,24 puan).
   tüm fonları döndürüyor. Seed bunu bilerek toplu çekip kod bazında ayırıyor.
 - **KAP'ın 2000 kayıt sınırı** ve sayfalama parametresi yok; `kap.fetch_complete` sınıra
   takılan pencereyi ikiye bölerek yeniden deniyor (ay sonlarında bildirim yoğunlaşıyor).
-- **Tek kullanıcı.** Auth yok, `positions` tablosunda `user_id` yok.
+- **RLS politikası yok.** İzolasyon şema + rol yetkisi + sorgulardaki `WHERE user_id = %s`
+  ile sağlanıyor: tablolar PostgREST'e açık olmayan `fonlu` şemasında duruyor ve uygulama
+  yalnız o şemaya yetkili `fonlu_app` rolüyle bağlanıyor.
 
 ## Yapılmadı
 
-- Kullanıcı bazlı auth
+- Şifre sıfırlama ve e-posta doğrulama akışı (Supabase'de e-posta onayı kapalı).
 - Bazı kurucuların PDF düzeni hâlâ okunamıyor (ölçülen örneklemde GNS, GOP, MAC).
   Her kurucunun düzenini kovalamak yerine eşleşmeyen bölümü hiç göstermemek tercih edildi;
   yeni bir düzen gerekirse `fonlu/holdings.py` içindeki `SECTIONS` ve `_parse_row`
