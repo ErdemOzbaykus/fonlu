@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from pytefas import TefasAPIError, TefasInvalidParameterError, TefasRateLimitError
 
-from . import holdings, kap, store
+from . import auth, holdings, kap, store
 
 app = FastAPI(title="Fonlu API")
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -23,10 +23,6 @@ refresh_state = {"running": False, "log": [], "error": None}
 # Onbellek bir donemin baslangicina tam yetismedginde bu kadar gunluk sapma
 # donemi gecersiz saymaz (hafta sonu / tatil).
 GRACE_DAYS = 7
-
-# positions.user_id NOT NULL; auth henuz yok, INSERT bir deger vermek zorunda.
-# Task 4 bunu dogrulanmis JWT'nin `sub` claim'iyle degistiriyor.
-_PLACEHOLDER_USER = "00000000-0000-0000-0000-000000000000"
 
 
 def _months_back(d: date, months: int) -> date:
@@ -47,6 +43,7 @@ def db():
 
 
 Db = Annotated[psycopg.Connection, Depends(db)]
+User = Annotated[str, Depends(auth.current_user)]
 
 
 @app.exception_handler(TefasRateLimitError)
@@ -73,7 +70,7 @@ def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
 
 
 @app.get("/api/status")
-def status(conn: Db):
+def status(conn: Db, user: User):
     n = conn.execute("SELECT COUNT(*) c FROM prices").fetchone()["c"]
     funds = conn.execute("SELECT COUNT(DISTINCT fund_code) c FROM prices").fetchone()["c"]
     return {
@@ -86,7 +83,8 @@ def status(conn: Db):
 
 
 @app.post("/api/refresh")
-def refresh(tasks: BackgroundTasks, days: Optional[int] = Query(None, ge=1, le=730)):
+def refresh(tasks: BackgroundTasks, user: User,
+            days: Optional[int] = Query(None, ge=1, le=730)):
     if refresh_state["running"]:
         raise HTTPException(409, "Guncelleme zaten calisiyor.")
 
@@ -108,6 +106,7 @@ def refresh(tasks: BackgroundTasks, days: Optional[int] = Query(None, ge=1, le=7
 @app.get("/api/funds")
 def list_funds(
     conn: Db,
+    user: User,
     kind: Optional[Literal["YAT", "EMK", "BYF", "GYF", "GSYF"]] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -267,7 +266,8 @@ def _category(groups: dict) -> Optional[str]:
 
 
 @app.get("/api/funds/{code}")
-def fund_detail(code: str, conn: Db, start: Optional[str] = None, end: Optional[str] = None):
+def fund_detail(code: str, conn: Db, user: User,
+                start: Optional[str] = None, end: Optional[str] = None):
     code = code.upper()
     start, end = _range(start, end)
     series = conn.execute(
@@ -326,7 +326,7 @@ def fund_detail(code: str, conn: Db, start: Optional[str] = None, end: Optional[
 
 
 @app.get("/api/funds/{code}/kap")
-def fund_kap(code: str, conn: Db, limit: int = Query(50, ge=1, le=200)):
+def fund_kap(code: str, conn: Db, user: User, limit: int = Query(50, ge=1, le=200)):
     """Fonun KAP bildirimleri (onbellekten). Detayli portfoy kirilimi 'Portfoy
     Dagilim Raporu' bildirimlerinin PDF ekinde bulunur."""
     rows = conn.execute(
@@ -342,7 +342,7 @@ def fund_kap(code: str, conn: Db, limit: int = Query(50, ge=1, le=200)):
 
 
 @app.get("/api/kap/{disclosure_index}/attachments")
-def kap_attachments(disclosure_index: int):
+def kap_attachments(disclosure_index: int, user: User):
     """Bir bildirimin PDF ekleri. KAP'a canli gider, sadece tiklaninca cagrilir."""
     try:
         atts = kap.attachments(disclosure_index)
@@ -356,7 +356,7 @@ def kap_attachments(disclosure_index: int):
 
 
 @app.get("/api/kap/file/{obj_id}")
-def kap_file(obj_id: str):
+def kap_file(obj_id: str, user: User):
     """KAP ekini temiz PDF olarak servis eder."""
     if not obj_id.isalnum():
         raise HTTPException(400, "Gecersiz dosya kimligi.")
@@ -397,7 +397,7 @@ def _match(tefas_pct: float, extracted_pct: float) -> str:
 
 
 @app.get("/api/funds/{code}/holdings")
-def fund_holdings(code: str, conn: Db):
+def fund_holdings(code: str, conn: Db, user: User):
     """Fonun kalem bazli portfoyu, varlik sinifina gore gruplanmis.
 
     Her bolum icin TEFAS'in bildirdigi yuzde ile cikarilan yuzde birlikte
@@ -465,7 +465,7 @@ def fund_holdings(code: str, conn: Db):
 
 
 @app.post("/api/funds/{code}/holdings")
-def extract_holdings(code: str, conn: Db):
+def extract_holdings(code: str, conn: Db, user: User):
     """Son iki 'Portfoy Dagilim Raporu' PDF'ini indirip kalemleri cikarir.
 
     Iki rapor cekiliyor cunku ay bazli kiyas (varlik yeni mi, agirligi degisti mi)
@@ -510,34 +510,37 @@ def extract_holdings(code: str, conn: Db):
             "Rapor okundu ama kalem çıkarılamadı — bu kurucunun PDF düzeni "
             "destekleniyor değil. Raporu KAP'tan açıp inceleyebilirsiniz.",
         )
-    return fund_holdings(code, conn)
+    return fund_holdings(code, conn, user)
 
 
 @app.get("/api/watchlist")
-def get_watchlist(conn: Db):
-    rows = conn.execute("SELECT fund_code FROM watchlist ORDER BY added_at DESC").fetchall()
+def get_watchlist(conn: Db, user: User):
+    rows = conn.execute("SELECT fund_code FROM watchlist WHERE user_id = %s"
+                        " ORDER BY added_at DESC", (user,)).fetchall()
     return {"codes": [r["fund_code"] for r in rows]}
 
 
 @app.put("/api/watchlist/{code}", status_code=204)
-def add_watch(code: str, conn: Db):
+def add_watch(code: str, conn: Db, user: User):
     code = code.upper()
     if not code.isalnum() or len(code) > 10:
         raise HTTPException(400, "Gecersiz fon kodu.")
-    conn.execute("INSERT INTO watchlist (fund_code) VALUES (%s)"
-                 " ON CONFLICT (user_id, fund_code) DO NOTHING", (code,))
+    conn.execute("INSERT INTO watchlist (user_id, fund_code) VALUES (%s, %s)"
+                 " ON CONFLICT (user_id, fund_code) DO NOTHING", (user, code))
     conn.commit()
 
 
 @app.delete("/api/watchlist/{code}", status_code=204)
-def remove_watch(code: str, conn: Db):
-    conn.execute("DELETE FROM watchlist WHERE fund_code = %s", (code.upper(),))
+def remove_watch(code: str, conn: Db, user: User):
+    conn.execute("DELETE FROM watchlist WHERE user_id = %s AND fund_code = %s",
+                 (user, code.upper()))
     conn.commit()
 
 
 @app.get("/api/compare")
 def compare(
     conn: Db,
+    user: User,
     codes: str = Query(..., description="Virgulle ayrilmis fon kodlari"),
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -583,7 +586,7 @@ class PositionIn(BaseModel):
 
 
 @app.post("/api/positions", status_code=201)
-def add_position(pos: PositionIn, conn: Db):
+def add_position(pos: PositionIn, conn: Db, user: User):
     # Bilinmeyen kod neredeyse her zaman yazim hatasi; kabul edilirse fiyati
     # hesaplanamayan olu bir pozisyon olusuyor ve sessizce oyle kaliyor.
     if not conn.execute("SELECT 1 FROM prices WHERE fund_code = %s LIMIT 1",
@@ -594,21 +597,23 @@ def add_position(pos: PositionIn, conn: Db):
     row = conn.execute(
         "INSERT INTO positions (user_id, fund_code, units, buy_date, buy_price, note)"
         " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
-        (_PLACEHOLDER_USER, pos.fund_code, pos.units, pos.buy_date, pos.buy_price, pos.note),
+        (user, pos.fund_code, pos.units, pos.buy_date, pos.buy_price, pos.note),
     ).fetchone()
     conn.commit()
     return {"id": row["id"]}
 
 
 @app.delete("/api/positions/{pos_id}", status_code=204)
-def delete_position(pos_id: int, conn: Db):
-    if not conn.execute("DELETE FROM positions WHERE id = %s", (pos_id,)).rowcount:
+def delete_position(pos_id: int, conn: Db, user: User):
+    # user_id kosulu sahiplik kontrolu: baskasinin pozisyonu 404 gorunmeli.
+    if not conn.execute("DELETE FROM positions WHERE id = %s AND user_id = %s",
+                        (pos_id, user)).rowcount:
         raise HTTPException(404, "Pozisyon bulunamadi.")
     conn.commit()
 
 
 @app.get("/api/positions")
-def list_positions(conn: Db):
+def list_positions(conn: Db, user: User):
     rows = conn.execute(
         """
         SELECT p.*, l.price AS last_price, l.date AS last_date, l.fund_name
@@ -619,8 +624,10 @@ def list_positions(conn: Db):
                 FROM prices
             ) r WHERE rn = 1
         ) l ON l.fund_code = p.fund_code
+        WHERE p.user_id = %s
         ORDER BY p.fund_code, p.buy_date
-        """
+        """,
+        (user,),
     ).fetchall()
 
     positions, cost_sum, value_sum = [], 0.0, 0.0

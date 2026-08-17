@@ -10,9 +10,15 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from fastapi.testclient import TestClient
 
-from fonlu import main, store
+from fonlu import auth, main, store
 
 DSN = os.environ["DATABASE_URL"]
+
+USER_A = "11111111-1111-4111-8111-111111111111"
+USER_B = "22222222-2222-4222-8222-222222222222"
+# Sozluk, cunku override lambda'si aktif kullaniciyi calisma aninda okumali:
+# duz bir degiskeni yeniden atamak lambda'nin gordugu degeri degistirmez.
+_who = {"id": USER_A}
 
 
 def fresh_schema():
@@ -40,6 +46,7 @@ def _override(schema):
             yield conn
 
     main.app.dependency_overrides[main.db] = _db
+    main.app.dependency_overrides[auth.current_user] = lambda: _who["id"]
 
 
 PRICES = [  # AAA doubles, BBB drops 20%, CCC has one day only
@@ -214,6 +221,16 @@ assert sorted(c.get("/api/watchlist").json()["codes"]) == ["AAA", "BBB"]
 assert c.put("/api/watchlist/a;b").status_code == 400
 assert c.delete("/api/watchlist/AAA").status_code == 204
 assert c.get("/api/watchlist").json()["codes"] == ["BBB"]
+
+# Watchlist ve pozisyonlar hesaba bagli: baska kullanici bunlari gormemeli.
+_who["id"] = USER_B
+assert c.get("/api/watchlist").json()["codes"] == [], "B, A'nin watchlist'ini goruyor"
+assert c.put("/api/watchlist/CCC").status_code == 204
+assert c.get("/api/watchlist").json()["codes"] == ["CCC"]
+assert c.get("/api/positions").json()["positions"] == [], "B, A'nin pozisyonlarini goruyor"
+_who["id"] = USER_A
+assert c.get("/api/watchlist").json()["codes"] == ["BBB"], "A'nin listesi B'den etkilendi"
+assert c.get("/api/positions").json()["total_cost"] == 100.0
 
 h = c.get("/api/funds/AAA/holdings").json()
 assert h["reports"] == [] and h["sections"] == {}
