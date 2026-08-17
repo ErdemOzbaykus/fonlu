@@ -251,6 +251,7 @@ function fundRow(f) {
     <td class="l faint" style="font-size:12px;white-space:nowrap">${f.category || "—"}</td>
     <td class="l">${allocBar(f.groups)}</td>
     <td class="num">${num(f.last_price, 6)}</td>
+    ${cell(f.daily_pct)}
     ${cell(f.return_pct)}
     <td class="num muted">${compact(f.portfolio_size)}</td>
     <td class="num muted">${int(f.investor_count)}</td></tr>`;

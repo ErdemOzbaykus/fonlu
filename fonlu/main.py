@@ -134,13 +134,16 @@ def list_funds(
     rows = conn.execute(
         """
         SELECT p.fund_code, p.kind, p.fund_name, p.last_price, p.first_price,
-               p.portfolio_size, p.investor_count, p.first_date, p.last_date, p.points,
-               b.allocation
+               p.prev_price, p.portfolio_size, p.investor_count, p.first_date,
+               p.last_date, p.points, b.allocation
         FROM (
             SELECT fund_code, kind, fund_name, portfolio_size, investor_count,
                    price AS last_price, date AS last_date,
                    FIRST_VALUE(price) OVER w AS first_price,
                    FIRST_VALUE(date)  OVER w AS first_date,
+                   -- Gunluk getiri icin bir onceki islem gununun fiyati. LAG cerceve
+                   -- (ROWS BETWEEN ...) tanimini yok sayar, w'nin siralamasini kullanir.
+                   LAG(price) OVER w AS prev_price,
                    COUNT(*) OVER (PARTITION BY fund_code) AS points,
                    ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) AS rn
             FROM prices
@@ -192,7 +195,9 @@ def list_funds(
                 continue
         fund = {k: r[k] for k in r.keys() if k != "allocation"}
         out.append({**fund, "first_price": first_price, "first_date": first_date,
-                    "return_pct": ret, "category": cat, "groups": groups})
+                    "return_pct": ret, "category": cat, "groups": groups,
+                    # Aralikta tek fiyat varsa onceki gun yok; None kalir, arayuz "—" basar.
+                    "daily_pct": _pct(r["prev_price"], r["last_price"])})
     out.sort(key=lambda f: (f["return_pct"] is None, -(f["return_pct"] or 0)))
     return {"start": start, "end": end, "count": len(out),
             "categories": CATEGORIES + ["Karma"], "funds": out[:limit]}

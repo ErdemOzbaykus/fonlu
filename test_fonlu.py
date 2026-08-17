@@ -119,6 +119,13 @@ assert by["BBB"]["return_pct"] == -20.0, by["BBB"]
 assert by["CCC"]["return_pct"] == 0.0, by["CCC"]  # single point -> flat, not a crash
 assert [f["fund_code"] for f in funds] == ["AAA", "DDD", "CCC", "BBB"], "return desc"
 
+# Gunluk getiri: donem getirisinden bagimsiz, son iki islem gunu arasi.
+assert by["AAA"]["daily_pct"] == 33.33, by["AAA"]   # 15 -> 20
+assert by["BBB"]["daily_pct"] == -20.0, by["BBB"]   # 100 -> 80 (aradaki gun bos)
+assert by["DDD"]["daily_pct"] == 9.09, by["DDD"]    # 55 -> 60
+# Tek fiyati olan fonun oncesi yok: uydurulmus bir %0 yerine bos kalmali.
+assert by["CCC"]["daily_pct"] is None, by["CCC"]
+
 # range must clip the window, not just the display
 win = {f["fund_code"]: f for f in c.get(
     "/api/funds", params={"start": "2026-08-11", "end": "2026-08-12"}).json()["funds"]}
