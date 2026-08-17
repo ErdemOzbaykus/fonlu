@@ -1,13 +1,46 @@
-"""Self-check over the query logic, on a throwaway DB with fixed prices.
-Run: python test_fonlu.py   (no TEFAS calls -- /api/refresh is never hit)"""
+"""Self-check over the query logic, on a throwaway schema with fixed prices.
+Run: docker compose --profile test run --rm tests   (no TEFAS calls)"""
 
-import tempfile
+import os
 from datetime import date
-from pathlib import Path
+from uuid import uuid4
 
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from fastapi.testclient import TestClient
 
 from fonlu import main, store
+
+DSN = os.environ["DATABASE_URL"]
+
+
+def fresh_schema():
+    """Her kosum kendi semasinda: testler birbirinin verisini gormesin."""
+    name = "t" + uuid4().hex[:12]
+    with psycopg.connect(DSN, autocommit=True) as cn:
+        cn.execute(f'CREATE SCHEMA "{name}"')
+    with connect_test(name) as cn:
+        store.create_schema(cn)
+    return name
+
+
+def connect_test(schema):
+    return psycopg.connect(DSN, row_factory=dict_row, options=f"-c search_path={schema}")
+
+
+def _override(schema):
+    """Gercek bagimlilik gibi generator olmali: duz lambda baglantiyi kapatmiyor."""
+    pool = ConnectionPool(DSN, min_size=1, max_size=4, open=True,
+                          kwargs={"row_factory": dict_row,
+                                  "options": f"-c search_path={schema}"})
+
+    def _db():
+        with pool.connection() as conn:
+            yield conn
+
+    main.app.dependency_overrides[main.db] = _db
+
 
 PRICES = [  # AAA doubles, BBB drops 20%, CCC has one day only
     ("AAA", "2026-08-10", 10.0), ("AAA", "2026-08-11", 15.0), ("AAA", "2026-08-12", 20.0),
@@ -20,32 +53,26 @@ PRICES = [  # AAA doubles, BBB drops 20%, CCC has one day only
 
 
 def build():
-    db = Path(tempfile.mkdtemp()) / "t.db"
-    conn = store.connect(db)
-    conn.executemany(
-        "INSERT INTO prices (fund_code,date,kind,fund_name,price,portfolio_size,investor_count)"
-        " VALUES (?,?,'YAT','Test '||?,?,1000,10)",
-        [(c, d, c, p) for c, d, p in PRICES],
-    )
-    conn.execute("INSERT INTO breakdown VALUES ('AAA','2026-08-12','{\"stock_pct\": 92.5}')")
-    conn.execute("INSERT INTO breakdown VALUES ('BBB','2026-08-12',"
-                 "'{\"reverse_repo_pct\": 60.0, \"deposit_tl_pct\": 40.0}')")
-    conn.execute("INSERT INTO kap_disclosures VALUES "
-                 # attachment_count 0 keeps the suite offline: extraction must bail early
-                 "(999,'AAA','2026-08-10 09:00:00','A FONU','Portföy Dağılım Raporu','Temmuz','DG',0)")
-    conn.commit()
-    conn.close()
-    # Must be a generator like the real dependency: a plain lambda never closes
-    # the connection, and the leaked readers eventually block a write in WAL mode.
-    def _db():
-        conn = store.connect(db)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
-    main.app.dependency_overrides[main.db] = _db
-    return TestClient(main.app), db
+    schema = fresh_schema()
+    with connect_test(schema) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO prices (fund_code,date,kind,fund_name,price,portfolio_size,"
+                "investor_count) VALUES (%s,%s,'YAT','Test '||%s,%s,1000,10)",
+                [(c, d, c, p) for c, d, p in PRICES],
+            )
+            cur.execute("INSERT INTO breakdown VALUES ('AAA','2026-08-12',"
+                        "'{\"stock_pct\": 92.5}')")
+            cur.execute("INSERT INTO breakdown VALUES ('BBB','2026-08-12',"
+                        "'{\"reverse_repo_pct\": 60.0, \"deposit_tl_pct\": 40.0}')")
+            cur.execute(
+                "INSERT INTO kap_disclosures VALUES "
+                # attachment_count 0 keeps the suite offline: extraction must bail early
+                "(999,'AAA','2026-08-10 09:00:00','A FONU','Portföy Dağılım Raporu',"
+                "'Temmuz','DG',0)")
+        conn.commit()
+    _override(schema)
+    return TestClient(main.app), schema
 
 
 def build_periods_client():
@@ -53,8 +80,7 @@ def build_periods_client():
     exactly the 90-day seed shape, where the 3-month cutoff (2026-05-16) is a
     Saturday and so falls before the first price that exists."""
     from datetime import date, timedelta
-    db = Path(tempfile.mkdtemp()) / "p.db"
-    conn = store.connect(db)
+    schema = fresh_schema()
     day, end, rows = date(2026, 5, 18), date(2026, 8, 14), []
     price = 10.0
     while day <= end:
@@ -62,25 +88,20 @@ def build_periods_client():
             rows.append(("PPP", day.isoformat(), price))
             price *= 1.001
         day += timedelta(days=1)
-    conn.executemany(
-        "INSERT INTO prices (fund_code,date,kind,fund_name,price) VALUES (?,?,'YAT','P',?)", rows)
-    conn.commit()
-    conn.close()
+    with connect_test(schema) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO prices (fund_code,date,kind,fund_name,price)"
+                " VALUES (%s,%s,'YAT','P',%s)", rows)
+        conn.commit()
 
-    def _db():
-        cn = store.connect(db)
-        try:
-            yield cn
-        finally:
-            cn.close()
-
-    main.app.dependency_overrides[main.db] = _db
+    _override(schema)
     out = TestClient(main.app).get("/api/funds/PPP").json()["periods"]
     main.app.dependency_overrides[main.db] = _restore
     return out
 
 
-c, DB = build()
+c, SCHEMA = build()
 _restore = main.app.dependency_overrides[main.db]
 R = {"start": "2026-08-01", "end": "2026-08-31"}
 
@@ -204,18 +225,20 @@ assert c.get("/api/funds/BBB/holdings").json()["tefas_sections"] == {"repo": 60.
 assert c.post("/api/funds/AAA/holdings").status_code == 404
 
 # --- month-over-month diff and per-section TEFAS agreement ---
-conn = store.connect(DB)
-conn.executemany("INSERT INTO holdings VALUES (?,?,?,?,?,?,?,?,?)", [
-    # current report
-    ("AAA", "2026-08-10", "hisse", "BIMAS", "TRE1", "BIM", 100.0, 50.0, 1),
-    ("AAA", "2026-08-10", "hisse", "ASELS", "TRE2", "ASELSAN", 80.0, 42.5, 1),
-    # previous report: ASELS lighter, EREGL since sold out entirely
-    ("AAA", "2026-07-10", "hisse", "BIMAS", "TRE1", "BIM", 90.0, 50.0, 2),
-    ("AAA", "2026-07-10", "hisse", "ASELS", "TRE2", "ASELSAN", 40.0, 20.0, 2),
-    ("AAA", "2026-07-10", "hisse", "EREGL", "TRE3", "EREGLI", 30.0, 15.0, 2),
-])
-conn.commit()
-conn.close()
+with connect_test(SCHEMA) as conn:
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO holdings (fund_code,report_date,section,code,isin,issuer,"
+            "value,weight_pct,disclosure_index) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", [
+            # current report
+            ("AAA", "2026-08-10", "hisse", "BIMAS", "TRE1", "BIM", 100.0, 50.0, 1),
+            ("AAA", "2026-08-10", "hisse", "ASELS", "TRE2", "ASELSAN", 80.0, 42.5, 1),
+            # previous report: ASELS lighter, EREGL since sold out entirely
+            ("AAA", "2026-07-10", "hisse", "BIMAS", "TRE1", "BIM", 90.0, 50.0, 2),
+            ("AAA", "2026-07-10", "hisse", "ASELS", "TRE2", "ASELSAN", 40.0, 20.0, 2),
+            ("AAA", "2026-07-10", "hisse", "EREGL", "TRE3", "EREGLI", 30.0, 15.0, 2),
+        ])
+    conn.commit()
 
 hh = c.get("/api/funds/AAA/holdings").json()
 assert hh["current_report"] == "2026-08-10" and hh["previous_report"] == "2026-07-10"
@@ -411,34 +434,7 @@ assert H._to_float("2.16%") == 2.16
 # weight column (2nd from the end) over 100% means the row came from another table
 assert parse("HİSSE SENETLERİ\nAAAA TL X 1,00 2,00 3,00 4,00 900,00 6,00\n") == []
 
-# --- schema migration: an existing DB carries the pre-section holdings table ---
-import sqlite3
-
-old_db = Path(tempfile.mkdtemp()) / "old.db"
-_c = sqlite3.connect(old_db)
-_c.executescript("""
-CREATE TABLE holdings (fund_code TEXT, ticker TEXT, isin TEXT, issuer TEXT,
-  value REAL, weight_pct REAL, report_date TEXT, disclosure_index INTEGER,
-  PRIMARY KEY (fund_code, ticker));
-CREATE TABLE prices (fund_code TEXT, date TEXT, kind TEXT, fund_name TEXT, price REAL,
-  shares_outstanding REAL, investor_count INTEGER, portfolio_size REAL,
-  PRIMARY KEY (fund_code, date));
-INSERT INTO holdings VALUES ('AAA','BIMAS','TR1','BIM',1.0,2.0,'2026-08-01',9);
-INSERT INTO prices (fund_code,date,price) VALUES ('AAA','2026-08-01',10.0);
-""")
-_c.commit()
-_c.close()
-
-mig = store.connect(old_db)
-assert "section" in {r[1] for r in mig.execute("PRAGMA table_info(holdings)")}
-mig.execute("INSERT INTO holdings VALUES ('AAA','2026-08-10','hisse','BIMAS','TR1','BIM',1.0,2.0,9)")
-mig.commit()
-# prices must survive: only the rebuildable holdings cache may be dropped
-assert mig.execute("SELECT COUNT(*) FROM prices").fetchone()[0] == 1
-mig.close()
-# reopening must not wipe the freshly migrated table again
-again = store.connect(old_db)
-assert again.execute("SELECT COUNT(*) FROM holdings").fetchone()[0] == 1
-again.close()
+# Eski sqlite holdings semasinin migration testi kalkti: store._migrate() ile
+# birlikte sqlite katmani tamamen gitti, test edecek bir sey kalmadi.
 
 print("ok")

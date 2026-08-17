@@ -87,23 +87,31 @@ def sync(conn, days=90, log=print):
     while cur <= end:
         chunk_end = min(cur + timedelta(days=CHUNK_DAYS - 1), end)
         rows = fetch_complete(cur, chunk_end)
-        conn.executemany(
-            "INSERT OR REPLACE INTO kap_disclosures VALUES (?,?,?,?,?,?,?,?)",
-            [
-                (
-                    r["disclosureIndex"],
-                    r["fundCode"],
-                    _iso(r["publishDate"]),
-                    r.get("kapTitle"),
-                    r.get("subject"),
-                    r.get("summary"),
-                    r.get("disclosureClass"),
-                    r.get("attachmentCount") or 0,
-                )
-                for r in rows
-                if r.get("fundCode") and r.get("disclosureIndex")
-            ],
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO kap_disclosures (disclosure_index, fund_code, publish_date,"
+                " title, subject, summary, disclosure_class, attachment_count)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
+                " ON CONFLICT (disclosure_index) DO UPDATE SET"
+                " fund_code = EXCLUDED.fund_code, publish_date = EXCLUDED.publish_date,"
+                " title = EXCLUDED.title, subject = EXCLUDED.subject,"
+                " summary = EXCLUDED.summary, disclosure_class = EXCLUDED.disclosure_class,"
+                " attachment_count = EXCLUDED.attachment_count",
+                [
+                    (
+                        r["disclosureIndex"],
+                        r["fundCode"],
+                        _iso(r["publishDate"]),
+                        r.get("kapTitle"),
+                        r.get("subject"),
+                        r.get("summary"),
+                        r.get("disclosureClass"),
+                        r.get("attachmentCount") or 0,
+                    )
+                    for r in rows
+                    if r.get("fundCode") and r.get("disclosureIndex")
+                ],
+            )
         conn.commit()
         total += len(rows)
         log(f"KAP {cur} -> {chunk_end}: {len(rows)} bildirim")

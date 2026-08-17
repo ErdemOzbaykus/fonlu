@@ -22,5 +22,32 @@ services:
       start_period: 10s
       retries: 3
 
+  test-db:
+    image: postgres:17
+    profiles: [test]
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: fonlu_test
+    # Testler saniyeler suruyor; kalici volume gereksiz, tmpfs daha hizli.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  tests:
+    build: .
+    profiles: [test]
+    depends_on:
+      test-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:test@test-db:5432/fonlu_test
+      # Testte sahte: JWT dogrulamasi override ediliyor, aga cikilmiyor.
+      SUPABASE_URL: https://example.invalid
+    command: python test_fonlu.py
+
 volumes:
   fonlu-data:

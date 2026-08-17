@@ -1,132 +1,72 @@
-"""SQLite cache over pytefas. Also the seed/update CLI: python -m fonlu.store --days 90"""
+"""Supabase Postgres onbellegi. Ayrica seed/update CLI: python -m fonlu.store --days 90"""
 
 import json
 import os
-import sqlite3
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 from pytefas import Crawler
 
 from . import kap
 
-# Docker'da veritabani koda degil bir volume'e yaziliyor; FONLU_DB ile yolu degistir.
-DB_PATH = Path(os.environ.get("FONLU_DB")
-               or Path(__file__).resolve().parent.parent / "fonlu.db")
+SCHEMA_SQL = (Path(__file__).resolve().parent / "schema.sql").read_text()
 KINDS = ("YAT", "EMK", "BYF")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS prices (
-    fund_code TEXT NOT NULL,
-    date TEXT NOT NULL,
-    kind TEXT,
-    fund_name TEXT,
-    price REAL,
-    shares_outstanding REAL,
-    investor_count INTEGER,
-    portfolio_size REAL,
-    PRIMARY KEY (fund_code, date)
-);
-CREATE INDEX IF NOT EXISTS prices_date ON prices(date);
-
--- Only the most recent snapshot per fund is kept; allocation is a JSON map of
--- non-zero pct columns, since normalizing 54 percentage columns buys nothing.
-CREATE TABLE IF NOT EXISTS breakdown (
-    fund_code TEXT PRIMARY KEY,
-    date TEXT NOT NULL,
-    allocation TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS kap_disclosures (
-    disclosure_index INTEGER PRIMARY KEY,
-    fund_code TEXT NOT NULL,
-    publish_date TEXT NOT NULL,
-    title TEXT,
-    subject TEXT,
-    summary TEXT,
-    disclosure_class TEXT,
-    attachment_count INTEGER
-);
-CREATE INDEX IF NOT EXISTS kap_fund ON kap_disclosures(fund_code, publish_date DESC);
-
--- KAP portfoy dagilim raporundan cikarilan kalemler. Talep uzerine doluyor (PDF
--- indirip ayristirmak yavas), bir daha ayni PDF'e gidilmiyor. Rapor tarihi PK'da:
--- ay bazli kiyas icin fon basina birden fazla rapor tutuluyor.
-CREATE TABLE IF NOT EXISTS holdings (
-    fund_code TEXT NOT NULL,
-    report_date TEXT NOT NULL,
-    section TEXT NOT NULL,
-    code TEXT NOT NULL,
-    isin TEXT,
-    issuer TEXT,
-    value REAL,
-    weight_pct REAL,
-    disclosure_index INTEGER,
-    PRIMARY KEY (fund_code, report_date, section, code)
-);
-
-CREATE TABLE IF NOT EXISTS watchlist (
-    fund_code TEXT PRIMARY KEY,
-    added_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fund_code TEXT NOT NULL,
-    units REAL NOT NULL CHECK (units > 0),
-    buy_date TEXT NOT NULL,
-    buy_price REAL NOT NULL CHECK (buy_price > 0),
-    note TEXT
-);
-"""
+_pool: ConnectionPool | None = None
 
 
-def connect(path=None):
-    # check_same_thread=False: FastAPI runs a sync dependency and its endpoint on
-    # different threadpool threads. Each request still gets its own connection, so
-    # nothing is shared concurrently. WAL keeps reads working while a refresh writes.
-    conn = sqlite3.connect(path or DB_PATH, check_same_thread=False, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    _migrate(conn)
-    conn.executescript(SCHEMA)
-    return conn
+def get_pool() -> ConnectionPool:
+    """Surec basina tek havuz. Ilk kullanimda aciliyor: import aninda acmak
+    DATABASE_URL'i her import edende zorunlu kilardi (testler, gocmen script)."""
+    global _pool
+    if _pool is None:
+        _pool = ConnectionPool(
+            os.environ["DATABASE_URL"],
+            min_size=1,
+            max_size=10,
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+    return _pool
 
 
-def _migrate(conn):
-    """Eski holdings semasini dusur.
-
-    holdings tek fon icin tek rapor tutuyordu (fund_code, ticker); simdi rapor
-    tarihi ve varlik bolumu de anahtarda. CREATE TABLE IF NOT EXISTS eski tabloyu
-    donusturmedigi icin acikca dusuruluyor -- icerigi KAP'tan yeniden uretilebilen
-    bir onbellek, veri kaybi degil.
-    """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(holdings)")}
-    if cols and "section" not in cols:
-        conn.execute("DROP TABLE holdings")
-        conn.commit()
+def create_schema(conn):
+    """schema.sql'i baglantinin search_path'indeki semaya kurar. Uretimde sema
+    migration'la kuruluyor; bu yol testler ve gocmen script icin."""
+    conn.execute(SCHEMA_SQL)
+    conn.commit()
 
 
 def last_cached_date(conn):
-    row = conn.execute("SELECT MAX(date) AS d FROM prices").fetchone()
-    return row["d"]
+    """Onbellekteki en son fiyat gunu. Artik `date` nesnesi donuyor, metin degil."""
+    return conn.execute("SELECT MAX(date) AS d FROM prices").fetchone()["d"]
 
 
 def _clean(df):
-    """pandas NaN -> None so sqlite stores NULL instead of the float nan."""
+    """pandas NaN -> None, sqlite yerine artik psycopg NULL yazsin diye."""
     return df.astype(object).where(pd.notna(df), None)
 
 
 def store_prices(conn, df):
     cols = ["fund_code", "date", "kind", "fund_name", "price",
             "shares_outstanding", "investor_count", "portfolio_size"]
-    rows = _clean(df[cols]).itertuples(index=False, name=None)
-    conn.executemany(
-        f"INSERT OR REPLACE INTO prices ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-        rows,
-    )
+    # date sutunu artik gercek `date` tipinde; pytefas metin de verse
+    # Timestamp da verse tek bicime indiriyoruz.
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    rows = list(_clean(df[cols]).itertuples(index=False, name=None))
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols[2:])
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"INSERT INTO prices ({','.join(cols)})"
+            f" VALUES ({','.join(['%s'] * len(cols))})"
+            f" ON CONFLICT (fund_code, date) DO UPDATE SET {updates}",
+            rows,
+        )
     conn.commit()
 
 
@@ -136,8 +76,14 @@ def store_breakdown(conn, df):
     for r in df.to_dict("records"):
         alloc = {c: round(r[c], 2) for c in pct_cols if pd.notna(r[c]) and r[c]}
         if alloc:
-            rows.append((r["fund_code"], r["date"], json.dumps(alloc)))
-    conn.executemany("INSERT OR REPLACE INTO breakdown VALUES (?,?,?)", rows)
+            rows.append((r["fund_code"], pd.to_datetime(r["date"]).date(), json.dumps(alloc)))
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO breakdown (fund_code, date, allocation) VALUES (%s, %s, %s)"
+            " ON CONFLICT (fund_code) DO UPDATE SET"
+            " date = EXCLUDED.date, allocation = EXCLUDED.allocation",
+            rows,
+        )
     conn.commit()
 
 
@@ -148,7 +94,13 @@ def sync(days=None, kinds=KINDS, conn=None, log=print):
     last cached date (the daily incremental run). Breakdown is fetched for the
     end date only -- the detail view shows current allocation, not its history.
     """
-    conn = conn or connect()
+    if conn is None:
+        with get_pool().connection() as conn:
+            return _sync(conn, days, kinds, log)
+    return _sync(conn, days, kinds, log)
+
+
+def _sync(conn, days, kinds, log):
     end = date.today()
     if days is not None:
         start = end - timedelta(days=days)
@@ -156,7 +108,7 @@ def sync(days=None, kinds=KINDS, conn=None, log=print):
         last = last_cached_date(conn)
         if not last:
             raise RuntimeError("Cache bos. Once --days ile seed calistirin.")
-        start = date.fromisoformat(last) + timedelta(days=1)
+        start = last + timedelta(days=1)   # last artik date; fromisoformat gerekmiyor
         if start > end:
             log("Guncel, yapilacak is yok.")
             return 0
