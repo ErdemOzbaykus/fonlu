@@ -1,6 +1,58 @@
 const $ = (id) => document.getElementById(id);
-const api = async (path, opts) => {
-  const r = await fetch("/api" + path, opts);
+
+// Anon key ve URL frontend'e gömülüyor; ikisi de gizli değil, tasarım gereği.
+const SUPABASE_URL = "https://phmewfvayruiwxnbmvrp.supabase.co";
+const SUPABASE_KEY = "sb_publishable_eeQgH8QQZY8J3FuaHug5iw_cVj3wxyt";
+const AUTH = SUPABASE_URL + "/auth/v1";
+
+const session = {
+  get: () => JSON.parse(localStorage.getItem("fonlu-session") || "null"),
+  set: (s) => localStorage.setItem("fonlu-session", JSON.stringify(s)),
+  clear: () => localStorage.removeItem("fonlu-session"),
+};
+
+async function gotrue(path, body) {
+  const r = await fetch(AUTH + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error_description || d.msg || d.message || "Giriş başarısız");
+  return d;
+}
+
+const signIn = (email, password) =>
+  gotrue("/token?grant_type=password", { email, password }).then(session.set);
+const signUp = (email, password) => gotrue("/signup", { email, password });
+
+// Access token 1 saatte doluyor; refresh token'la sessizce yenile.
+async function refresh() {
+  const s = session.get();
+  if (!s?.refresh_token) return null;
+  try {
+    const fresh = await gotrue("/token?grant_type=refresh_token",
+                               { refresh_token: s.refresh_token });
+    session.set(fresh);
+    return fresh.access_token;
+  } catch {
+    session.clear();
+    return null;
+  }
+}
+
+const api = async (path, opts = {}, retry = true) => {
+  const s = session.get();
+  const headers = { ...opts.headers };
+  if (s?.access_token) headers.Authorization = `Bearer ${s.access_token}`;
+  const r = await fetch("/api" + path, { ...opts, headers });
+  // Tek sefer yenilemeyi dene; yine 401 ise oturum gercekten bitmis.
+  if (r.status === 401 && retry) {
+    if (await refresh()) return api(path, opts, false);
+    session.clear();
+    showAuthGate();
+    throw new Error("Oturum sona erdi, tekrar giriş yapın.");
+  }
   const body = r.status === 204 ? null : await r.json();
   if (!r.ok) throw new Error(body?.detail || r.statusText);
   return body;
@@ -666,7 +718,7 @@ $("p-rows").onclick = async (e) => {
 };
 
 // ---------------- init ----------------
-(async () => {
+async function boot() {
   // Dönem alanları piyasadaki son veri gününe göre kurulmalı; bunun için status
   // beklenir, yoksa 1A dönemi bugüne göre kurulup TEFAS'la kayıyor.
   try { lastDataDate = (await api("/status")).last_date || lastDataDate; } catch { /* varsayılan */ }
@@ -676,4 +728,46 @@ $("p-rows").onclick = async (e) => {
   loadStatus();
   await loadWatchlist();
   loadFunds();
-})();
+}
+
+// ---------------- giriş kapısı ----------------
+function showAuthGate() {
+  $("auth-gate").hidden = false;
+  $("app-shell").hidden = true;
+}
+
+function authError(msg) {
+  const el = $("auth-error");
+  el.textContent = msg;
+  el.hidden = !msg;
+}
+
+async function start() {
+  if (!session.get()) return showAuthGate();
+  $("auth-gate").hidden = true;
+  $("app-shell").hidden = false;
+  await boot();   // uygulamanin mevcut acilis fonksiyonu
+}
+
+$("auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  authError("");
+  try {
+    await signIn($("auth-email").value.trim(), $("auth-pass").value);
+    await start();
+  } catch (err) { authError(err.message); }
+});
+
+$("auth-signup").addEventListener("click", async () => {
+  authError("");
+  try {
+    await signUp($("auth-email").value.trim(), $("auth-pass").value);
+    // E-posta dogrulamasi kapali, kayit aninda giris yapilabiliyor.
+    await signIn($("auth-email").value.trim(), $("auth-pass").value);
+    await start();
+  } catch (err) { authError(err.message); }
+});
+
+$("logout").addEventListener("click", () => { session.clear(); location.reload(); });
+
+start();
