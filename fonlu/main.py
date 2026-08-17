@@ -1,12 +1,12 @@
-"""Fonlu API. TEFAS reads are served from the SQLite cache; only /api/refresh
+"""Fonlu API. TEFAS reads are served from the Postgres cache; only /api/refresh
 talks to TEFAS, and it does so in the background."""
 
 import calendar
-import json
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
+import psycopg
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,10 @@ refresh_state = {"running": False, "log": [], "error": None}
 # donemi gecersiz saymaz (hafta sonu / tatil).
 GRACE_DAYS = 7
 
+# positions.user_id NOT NULL; auth henuz yok, INSERT bir deger vermek zorunda.
+# Task 4 bunu dogrulanmis JWT'nin `sub` claim'iyle degistiriyor.
+_PLACEHOLDER_USER = "00000000-0000-0000-0000-000000000000"
+
 
 def _months_back(d: date, months: int) -> date:
     """'1 ay once' = onceki ayin ayni gunu, 30 takvim gunu degil.
@@ -38,14 +42,11 @@ def _months_back(d: date, months: int) -> date:
 
 
 def db():
-    conn = store.connect()
-    try:
+    with store.get_pool().connection() as conn:
         yield conn
-    finally:
-        conn.close()
 
 
-Db = Annotated[store.sqlite3.Connection, Depends(db)]
+Db = Annotated[psycopg.Connection, Depends(db)]
 
 
 @app.exception_handler(TefasRateLimitError)
@@ -92,9 +93,9 @@ def refresh(tasks: BackgroundTasks, days: Optional[int] = Query(None, ge=1, le=7
     def job():
         refresh_state.update(running=True, log=[], error=None)
         try:
-            # ponytail: own connection because the request-scoped one is closed
-            # by then; single-user app, so no write contention to worry about.
-            store.sync(days=days, conn=store.connect(), log=refresh_state["log"].append)
+            # ponytail: kendi baglantisini havuzdan alsin; istek kapsamindaki
+            # baglanti bu noktada havuza geri verilmis oluyor.
+            store.sync(days=days, log=refresh_state["log"].append)
         except Exception as exc:  # surfaced through /api/status
             refresh_state["error"] = str(exc)
         finally:
@@ -130,7 +131,7 @@ def list_funds(
         # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
         # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
         kind = q = None
-    code_filter = (" AND fund_code IN (%s)" % ",".join("?" * len(wanted))) if wanted else ""
+    code_filter = (" AND fund_code IN (%s)" % ",".join(["%s"] * len(wanted))) if wanted else ""
     rows = conn.execute(
         """
         SELECT p.fund_code, p.kind, p.fund_name, p.last_price, p.first_price,
@@ -144,9 +145,11 @@ def list_funds(
                    COUNT(*) OVER (PARTITION BY fund_code) AS points,
                    ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) AS rn
             FROM prices
-            WHERE date BETWEEN ? AND ?
-              AND (? IS NULL OR kind = ?)
-              AND (? IS NULL OR fund_code LIKE ? OR UPPER(fund_name) LIKE ?)
+            WHERE date BETWEEN %s AND %s
+              -- ::text sart: Postgres ciplak bir parametrenin tipini IS NULL
+              -- icinde cikaramiyor, "could not determine data type" diyor.
+              AND (%s::text IS NULL OR kind = %s)
+              AND (%s::text IS NULL OR fund_code LIKE %s OR UPPER(fund_name) LIKE %s)
               """ + code_filter + """
             WINDOW w AS (PARTITION BY fund_code ORDER BY date
                          ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
@@ -166,7 +169,7 @@ def list_funds(
         """SELECT fund_code, price, date FROM (
              SELECT fund_code, price, date,
                     ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
-             FROM prices WHERE date BETWEEN date(?, '-15 days') AND ?)
+             FROM prices WHERE date BETWEEN %s::date - 15 AND %s) t
            WHERE rn = 1""", (start, start))}
 
     out = []
@@ -176,7 +179,8 @@ def list_funds(
         first_price = anchor["price"] if anchor else r["first_price"]
         first_date = anchor["date"] if anchor else r["first_date"]
         ret = _pct(first_price, r["last_price"])
-        groups = _groups(json.loads(r["allocation"]) if r["allocation"] else {})
+        # allocation jsonb: psycopg zaten dict olarak veriyor, json.loads gerekmiyor.
+        groups = _groups(r["allocation"] or {})
         cat = _category(groups)
         if not wanted:  # sabit kume istendiginde tarama filtreleri uygulanmaz
             if min_return is not None and (ret is None or ret < min_return):
@@ -267,34 +271,35 @@ def fund_detail(code: str, conn: Db, start: Optional[str] = None, end: Optional[
     code = code.upper()
     start, end = _range(start, end)
     series = conn.execute(
-        "SELECT date, price FROM prices WHERE fund_code = ? AND date BETWEEN ? AND ? ORDER BY date",
+        "SELECT date, price FROM prices WHERE fund_code = %s AND date BETWEEN %s AND %s ORDER BY date",
         (code, start, end),
     ).fetchall()
     if not series:
         raise HTTPException(404, f"{code} icin onbellekte veri yok. Once /api/refresh calistirin.")
     meta = conn.execute(
         "SELECT fund_name, kind, portfolio_size, investor_count, price, date"
-        " FROM prices WHERE fund_code = ? ORDER BY date DESC LIMIT 1",
+        " FROM prices WHERE fund_code = %s ORDER BY date DESC LIMIT 1",
         (code,),
     ).fetchone()
-    bd = conn.execute("SELECT date, allocation FROM breakdown WHERE fund_code = ?", (code,)).fetchone()
-    alloc = json.loads(bd["allocation"]) if bd else {}
+    bd = conn.execute("SELECT date, allocation FROM breakdown WHERE fund_code = %s", (code,)).fetchone()
+    alloc = bd["allocation"] if bd else {}
 
     # Period returns over whatever the cache holds, independent of the chosen range.
     hist = conn.execute(
-        "SELECT date, price FROM prices WHERE fund_code = ? ORDER BY date", (code,)
+        "SELECT date, price FROM prices WHERE fund_code = %s ORDER BY date", (code,)
     ).fetchall()
     prices = [r["price"] for r in hist if r["price"]]
     last = hist[-1]["price"]
     periods = {}
-    last_date = date.fromisoformat(hist[-1]["date"])
-    first_date = date.fromisoformat(hist[0]["date"])
+    # prices.date artik gercek `date`; fromisoformat'a gerek yok.
+    last_date = hist[-1]["date"]
+    first_date = hist[0]["date"]
     for label, months in (("1A", 1), ("3A", 3), ("6A", 6), ("1Y", 12)):
         target = _months_back(last_date, months)
         # TEFAS'in yaptigi gibi hedef tarihteki ya da ONCESINDEKI son fiyata
         # bagla; hedef hafta sonuna denk gelirse bir sonraki islem gunune atlamak
         # donemi kisaltip getiriyi yukseltiyor.
-        prior = [r for r in hist if r["date"] <= target.isoformat()]
+        prior = [r for r in hist if r["date"] <= target]
         if prior:
             periods[label] = _pct(prior[-1]["price"], last)
         elif first_date <= target + timedelta(days=GRACE_DAYS):
@@ -315,7 +320,7 @@ def fund_detail(code: str, conn: Db, start: Optional[str] = None, end: Optional[
         "periods": periods,
         **_risk(prices),
         "kap_count": conn.execute(
-            "SELECT COUNT(*) c FROM kap_disclosures WHERE fund_code = ?", (code,)
+            "SELECT COUNT(*) c FROM kap_disclosures WHERE fund_code = %s", (code,)
         ).fetchone()["c"],
     }
 
@@ -325,7 +330,7 @@ def fund_kap(code: str, conn: Db, limit: int = Query(50, ge=1, le=200)):
     """Fonun KAP bildirimleri (onbellekten). Detayli portfoy kirilimi 'Portfoy
     Dagilim Raporu' bildirimlerinin PDF ekinde bulunur."""
     rows = conn.execute(
-        "SELECT * FROM kap_disclosures WHERE fund_code = ? ORDER BY publish_date DESC LIMIT ?",
+        "SELECT * FROM kap_disclosures WHERE fund_code = %s ORDER BY publish_date DESC LIMIT %s",
         (code.upper(), limit),
     ).fetchall()
     return {
@@ -402,10 +407,10 @@ def fund_holdings(code: str, conn: Db):
     """
     code = code.upper()
     dates = [r["report_date"] for r in conn.execute(
-        "SELECT DISTINCT report_date FROM holdings WHERE fund_code = ?"
+        "SELECT DISTINCT report_date FROM holdings WHERE fund_code = %s"
         " ORDER BY report_date DESC LIMIT 2", (code,)).fetchall()]
-    bd = conn.execute("SELECT allocation FROM breakdown WHERE fund_code = ?", (code,)).fetchone()
-    tefas = _section_totals(json.loads(bd["allocation"]) if bd else {})
+    bd = conn.execute("SELECT allocation FROM breakdown WHERE fund_code = %s", (code,)).fetchone()
+    tefas = _section_totals(bd["allocation"] if bd else {})
     if not dates:
         return {"fund_code": code, "reports": [], "sections": {},
                 "tefas_sections": tefas, "labels": holdings.SECTION_LABELS,
@@ -414,11 +419,12 @@ def fund_holdings(code: str, conn: Db):
     current, previous = dates[0], (dates[1] if len(dates) > 1 else None)
     rows = conn.execute(
         "SELECT section, code, isin, issuer, value, weight_pct FROM holdings"
-        " WHERE fund_code = ? AND report_date = ? ORDER BY weight_pct DESC",
+        " WHERE fund_code = %s AND report_date = %s ORDER BY weight_pct DESC",
         (code, current)).fetchall()
+    # previous yoksa NULL gecilir; report_date artik `date`, bos metin tip hatasi verir.
     prev = {(r["section"], r["code"]): r["weight_pct"] for r in conn.execute(
-        "SELECT section, code, weight_pct FROM holdings WHERE fund_code = ? AND report_date = ?",
-        (code, previous or ""))}
+        "SELECT section, code, weight_pct FROM holdings WHERE fund_code = %s AND report_date = %s",
+        (code, previous))}
 
     sections: dict[str, dict] = {}
     for r in rows:
@@ -469,7 +475,7 @@ def extract_holdings(code: str, conn: Db):
     code = code.upper()
     reports = conn.execute(
         "SELECT disclosure_index, publish_date FROM kap_disclosures"
-        " WHERE fund_code = ? AND subject LIKE 'Portföy Dağılım%' AND attachment_count > 0"
+        " WHERE fund_code = %s AND subject LIKE 'Portföy Dağılım%%' AND attachment_count > 0"
         " ORDER BY publish_date DESC LIMIT 2", (code,)
     ).fetchall()
     if not reports:
@@ -486,13 +492,15 @@ def extract_holdings(code: str, conn: Db):
             if report is reports[0]:
                 raise HTTPException(502, str(exc))
             break
-        conn.execute("DELETE FROM holdings WHERE fund_code = ? AND report_date = ?",
+        conn.execute("DELETE FROM holdings WHERE fund_code = %s AND report_date = %s",
                      (code, report_date))
-        conn.executemany(
-            "INSERT INTO holdings VALUES (?,?,?,?,?,?,?,?,?)",
-            [(code, report_date, h["section"], h["code"], h["isin"], h["issuer"],
-              h["value"], h["weight_pct"], report["disclosure_index"]) for h in parsed],
-        )
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO holdings (fund_code,report_date,section,code,isin,issuer,"
+                "value,weight_pct,disclosure_index) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [(code, report_date, h["section"], h["code"], h["isin"], h["issuer"],
+                  h["value"], h["weight_pct"], report["disclosure_index"]) for h in parsed],
+            )
         stored += len(parsed)
     conn.commit()
 
@@ -516,13 +524,14 @@ def add_watch(code: str, conn: Db):
     code = code.upper()
     if not code.isalnum() or len(code) > 10:
         raise HTTPException(400, "Gecersiz fon kodu.")
-    conn.execute("INSERT OR REPLACE INTO watchlist VALUES (?, datetime('now'))", (code,))
+    conn.execute("INSERT INTO watchlist (fund_code) VALUES (%s)"
+                 " ON CONFLICT (user_id, fund_code) DO NOTHING", (code,))
     conn.commit()
 
 
 @app.delete("/api/watchlist/{code}", status_code=204)
 def remove_watch(code: str, conn: Db):
-    conn.execute("DELETE FROM watchlist WHERE fund_code = ?", (code.upper(),))
+    conn.execute("DELETE FROM watchlist WHERE fund_code = %s", (code.upper(),))
     conn.commit()
 
 
@@ -541,7 +550,8 @@ def compare(
     result, missing = [], []
     for code in wanted:
         rows = conn.execute(
-            "SELECT date, price FROM prices WHERE fund_code = ? AND date BETWEEN ? AND ? ORDER BY date",
+            "SELECT date, price FROM prices WHERE fund_code = %s AND date BETWEEN %s AND %s"
+            " ORDER BY date",
             (code, start, end),
         ).fetchall()
         if not rows or not rows[0]["price"]:
@@ -576,21 +586,23 @@ class PositionIn(BaseModel):
 def add_position(pos: PositionIn, conn: Db):
     # Bilinmeyen kod neredeyse her zaman yazim hatasi; kabul edilirse fiyati
     # hesaplanamayan olu bir pozisyon olusuyor ve sessizce oyle kaliyor.
-    if not conn.execute("SELECT 1 FROM prices WHERE fund_code = ? LIMIT 1",
+    if not conn.execute("SELECT 1 FROM prices WHERE fund_code = %s LIMIT 1",
                         (pos.fund_code,)).fetchone():
         raise HTTPException(
             404, f"{pos.fund_code} önbellekte yok. Kodu kontrol edin veya veriyi güncelleyin.")
-    cur = conn.execute(
-        "INSERT INTO positions (fund_code, units, buy_date, buy_price, note) VALUES (?,?,?,?,?)",
-        (pos.fund_code, pos.units, pos.buy_date.isoformat(), pos.buy_price, pos.note),
-    )
+    # Postgres'te lastrowid yok; id RETURNING ile geri geliyor.
+    row = conn.execute(
+        "INSERT INTO positions (user_id, fund_code, units, buy_date, buy_price, note)"
+        " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+        (_PLACEHOLDER_USER, pos.fund_code, pos.units, pos.buy_date, pos.buy_price, pos.note),
+    ).fetchone()
     conn.commit()
-    return {"id": cur.lastrowid}
+    return {"id": row["id"]}
 
 
 @app.delete("/api/positions/{pos_id}", status_code=204)
 def delete_position(pos_id: int, conn: Db):
-    if not conn.execute("DELETE FROM positions WHERE id = ?", (pos_id,)).rowcount:
+    if not conn.execute("DELETE FROM positions WHERE id = %s", (pos_id,)).rowcount:
         raise HTTPException(404, "Pozisyon bulunamadi.")
     conn.commit()
 
@@ -605,7 +617,7 @@ def list_positions(conn: Db):
             SELECT fund_code, fund_name, price, date FROM (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
                 FROM prices
-            ) WHERE rn = 1
+            ) r WHERE rn = 1
         ) l ON l.fund_code = p.fund_code
         ORDER BY p.fund_code, p.buy_date
         """
