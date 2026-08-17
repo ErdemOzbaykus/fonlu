@@ -4,6 +4,7 @@ services:
     container_name: fonlu
     # Docker Desktop yeniden baslatildiginda site kendiliginden geri gelsin.
     restart: unless-stopped
+    env_file: .env
     ports:
       - "8000:8000"
     volumes:
