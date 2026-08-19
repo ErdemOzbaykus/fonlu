@@ -53,6 +53,9 @@ const api = async (path, opts = {}, retry = true) => {
     showAuthGate();
     throw new Error("Oturum sona erdi, tekrar giriş yapın.");
   }
+  // opts.blob: PDF gibi ikili yanitlar. Duz <a href> Authorization basligi
+  // tasimadigi icin ekler 401 aliyordu; ayni token'la burdan iniyorlar.
+  if (r.ok && opts.blob) return r.blob();
   const body = r.status === 204 ? null : await r.json();
   if (!r.ok) throw new Error(body?.detail || r.statusText);
   return body;
@@ -64,6 +67,7 @@ const num = (v, d = 2) => (v == null ? "—" : v.toLocaleString("tr-TR",
 const compact = (v) => (v == null ? "—" : v.toLocaleString("tr-TR",
   { notation: "compact", maximumFractionDigits: 1 }));
 const int = (v) => (v == null ? "—" : v.toLocaleString("tr-TR"));
+const num2 = (v) => (v == null ? "—" : v.toLocaleString("tr-TR", { maximumFractionDigits: 2 }));
 const cls = (v) => (v == null ? "muted" : v >= 0 ? "up" : "down");
 const pct = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${num(v)}%`);
 const cell = (v) => `<td class="num ${cls(v)}">${pct(v)}</td>`;
@@ -131,15 +135,16 @@ const LINE_HEX = ["#f0a13c", "#4bbfa8", "#4f9bd9", "#c47ab5", "#e5626b",
                   "#d9c46b", "#7a86c9", "#35c88a"];
 
 const charts = {};
-function line(id, labels, datasets, yLabel) {
+function line(id, labels, datasets, yLabel, yTick) {
   charts[id]?.destroy();
   charts[id] = new Chart($(id), {
     type: "line",
     data: {
       labels,
       datasets: datasets.map((d, i) => ({
-        ...d, borderColor: LINE_HEX[i % LINE_HEX.length], backgroundColor: LINE_HEX[i % LINE_HEX.length],
+        borderColor: LINE_HEX[i % LINE_HEX.length], backgroundColor: LINE_HEX[i % LINE_HEX.length],
         borderWidth: 1.75, pointRadius: 0, pointHitRadius: 12, tension: 0.12,
+        ...d,  // dataset'in kendi tipi/rengi kazanir: nakit akisi bar olarak ciziliyor
       })),
     },
     options: {
@@ -157,7 +162,11 @@ function line(id, labels, datasets, yLabel) {
             },
           },
         },
-        y: { grid: { color: "#ffffff0d" }, title: yLabel ? { display: true, text: yLabel } : undefined },
+        y: {
+          grid: { color: "#ffffff0d" },
+          title: yLabel ? { display: true, text: yLabel } : undefined,
+          ticks: yTick ? { callback: yTick } : undefined,
+        },
       },
       plugins: {
         legend: { display: datasets.length > 1, labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true } },
@@ -408,15 +417,23 @@ async function openDrawer(code) {
 
   $("d-name").textContent = d.fund_name;
   $("d-cat").textContent = [d.kind, d.category].filter(Boolean).join(" · ");
-  $("d-price").textContent = num(d.price, 6);
+  $("d-price").textContent = num2(d.price);
   $("d-vol").textContent = d.volatility_pct == null ? "—" : num(d.volatility_pct) + "%";
   for (const [id, v] of [["d-ret", d.return_pct], ["d-mdd", d.max_drawdown_pct]]) {
     $(id).textContent = pct(v);
     $(id).className = cls(v);
   }
+  $("d-size").textContent = d.portfolio_size ? "₺" + compact(d.portfolio_size) : "—";
+  $("d-inv").textContent = int(d.investor_count);
+  $("d-share").innerHTML = d.peer
+    ? `${num(d.peer.share_pct)}%<i>${d.peer.rank}/${d.peer.count}</i>` : "—";
   $("d-periods").innerHTML = Object.entries(d.periods).map(([k, v]) =>
     `<div><small>${k} getiri</small><b class="${cls(v)}">${v == null ? "—" : pct(v)}</b></div>`).join("");
   line("d-chart", d.series.map((r) => r.date), [{ label: d.fund_code, data: d.series.map((r) => r.price) }], "₺");
+
+  loadForm(code);
+  flowData = flowSeries(d.series);
+  renderFlow($("d-flowseg").querySelector("button.on").dataset.flow);
 
   // allocation
   const groups = Object.entries(d.groups).sort((a, b) => b[1] - a[1]);
@@ -455,6 +472,60 @@ async function openDrawer(code) {
   loadHoldings(code, d.allocation);
 }
 
+// ---------------- yatirimci bilgi formu (KAP PDF) ----------------
+// TEFAS stopaj/ucret/valor vermiyor; formun PDF'i sunucuda ayristiriliyor.
+// Eslesmeyen alan bos kalir -- yanlis bir vergi orani gostermek daha kotu.
+async function loadForm(code) {
+  const cells = { stopaj_pct: "d-stopaj", management_fee_pct: "d-fee", valor_days: "d-valor" };
+  Object.values(cells).forEach((id) => $(id).textContent = "…");
+  let f;
+  try { f = await api(`/funds/${code}/form`); }
+  catch { Object.values(cells).forEach((id) => $(id).textContent = "—"); return; }
+  $("d-stopaj").textContent = f.stopaj_pct == null ? "—" : `%${num2(f.stopaj_pct)}`;
+  $("d-fee").textContent = f.management_fee_pct == null ? "—" : `%${num2(f.management_fee_pct)}`;
+  $("d-valor").textContent = f.valor_days == null ? "—" : `${num2(f.valor_days)} gün`;
+}
+
+// ---------------- nakit akisi ----------------
+// TEFAS giris/cikis tutarini vermiyor; tek turetilebilir yol pay sayisindaki
+// gunluk degisimi o gunun fiyatiyla carpmak. Sonuc net giris (+) / cikis (-).
+let flowData = [];
+
+function flowSeries(series) {
+  const out = [];
+  for (let i = 1; i < series.length; i++) {
+    const a = series[i - 1], b = series[i];
+    if (a.shares_outstanding == null || b.shares_outstanding == null) continue;
+    out.push({ date: b.date, flow: (b.shares_outstanding - a.shares_outstanding) * b.price });
+  }
+  return out;
+}
+
+function renderFlow(mode) {
+  if (!flowData.length) {
+    charts["d-flow"]?.destroy();
+    delete charts["d-flow"];
+    $("d-flownote").textContent = "Pay sayısı verisi yok, nakit akışı hesaplanamıyor.";
+    return;
+  }
+  let acc = 0;
+  const data = flowData.map((r) => (mode === "cum" ? (acc += r.flow) : r.flow));
+  line("d-flow", flowData.map((r) => r.date), [{
+    type: "bar", label: "Net akış", data, borderWidth: 0,
+    backgroundColor: data.map((v) => (v >= 0 ? "#35c88a" : "#e5626b")),
+  }], "₺", compact);
+  const total = flowData.reduce((t, r) => t + r.flow, 0);
+  $("d-flownote").textContent = `Seçili dönemde net ${total >= 0 ? "giriş" : "çıkış"}: `
+    + `₺${compact(Math.abs(total))} · yeşil giriş, kırmızı çıkış.`;
+}
+
+$("d-flowseg").onclick = (e) => {
+  const b = e.target.closest("button[data-flow]");
+  if (!b) return;
+  $("d-flowseg").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+  renderFlow(b.dataset.flow);
+};
+
 // ---------------- item-level holdings (KAP PDF) ----------------
 // Keyed by the TEFAS allocation column, so an allocation row can open its own
 // constituents. Only sections whose extracted total agrees with TEFAS are
@@ -463,7 +534,7 @@ let drill = { code: null, bySection: {}, previous: null, keyToSection: {} };
 
 function drillable(key) {
   const s = drill.bySection[drill.keyToSection[key]];
-  return s && s.items.length && s.match !== "eslesmedi" ? s : null;
+  return s && s.items.length ? s : null;
 }
 
 function subTable(s) {
@@ -483,9 +554,14 @@ function subTable(s) {
                <td class="num ${cls(h.delta)}">${h.delta == null ? "—" : pct(h.delta)}</td>` : ""}
     </tr>`;
   }).join("");
-  const note = s.match === "kismi"
-    ? `<p class="faint" style="font-size:12px;margin:8px 0 0">Kısmi çıkarım: rapordan
-       %${num(s.extracted_pct)} okundu, TEFAS %${num(s.tefas_pct)} bildiriyor.</p>` : "";
+  // Sayilar tutmadiginda kalemleri gizlemek yerine farki yaziyoruz: KAP raporu
+  // ay sonu, TEFAS dagilimi bugun -- aradaki oynama tek basina veriyi curutmuyor.
+  const note = s.match === "tam" ? "" :
+    `<p class="faint" style="font-size:12px;margin:8px 0 0">Rapordan
+       %${num(s.extracted_pct)} okundu, TEFAS %${num(s.tefas_pct ?? 0)} bildiriyor.
+       ${drill.current ? `KAP raporu ${drill.current} tarihli` : ""} — fark, fonun o
+       tarihten beri değişmiş olmasından ya da rapor başlığının TEFAS kategorisiyle
+       birebir örtüşmemesinden kaynaklanabilir.</p>`;
   return `<div class="subwrap"><table><thead>${head}</thead><tbody>${body}</tbody></table>${note}</div>`;
 }
 
@@ -520,7 +596,7 @@ async function loadHoldings(code, allocation) {
   catch { return; }
 
   drill = { code, bySection: d.sections, previous: d.previous_report,
-            keyToSection: d.key_to_section };
+            current: d.current_report, keyToSection: d.key_to_section };
   renderAllocRows(allocation);
 
   const extractable = Object.keys(d.tefas_sections).length > 0;
@@ -575,6 +651,21 @@ async function loadKap(code) {
 }
 
 $("d-kaplist").onclick = async (e) => {
+  const f = e.target.closest("button[data-file]");
+  if (f) {
+    f.disabled = true;
+    try {
+      const url = URL.createObjectURL(await api(`/kap/file/${f.dataset.file}`, { blob: true }));
+      Object.assign(document.createElement("a"), { href: url, download: f.dataset.name }).click();
+      // Hemen iptal etmek indirmeyi yarida kesebiliyor.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (err) {
+      f.insertAdjacentHTML("afterend",
+        `<span class="down" style="font-size:12px"> ${esc(err.message)}</span>`);
+    }
+    f.disabled = false;
+    return;
+  }
   const b = e.target.closest("button[data-att]");
   if (!b) return;
   b.disabled = true;
@@ -582,8 +673,9 @@ $("d-kaplist").onclick = async (e) => {
   try {
     const { attachments } = await api(`/kap/${b.dataset.att}/attachments`);
     b.outerHTML = attachments.length
-      ? attachments.map((a) => `<a href="${a.url}" target="_blank" rel="noopener noreferrer"
-          style="color:var(--accent);font-size:12px;display:block">↓ ${esc(a.file_name)}</a>`).join("")
+      ? attachments.map((a) => `<button class="btn ghost" data-file="${esc(a.obj_id)}"
+          data-name="${esc(a.file_name)}" style="padding:3px 8px;font-size:12px;display:block"
+          >↓ ${esc(a.file_name)}</button>`).join("")
       : '<span class="faint" style="font-size:12px">Ek bulunamadı.</span>';
   } catch (err) {
     b.disabled = false;

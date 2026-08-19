@@ -135,6 +135,10 @@ tbody tr:hover .kod { border-color:var(--accent); color:var(--accent); }
 .chartbox { position:relative; height:340px; }
 #d-overview .chartbox { height:260px; }
 #d-alloc .chartbox { height:230px; }
+#d-overview .chartbox.flow { height:190px; }
+/* KPI'nin yaninda duran ikincil deger: sinif payinin yaninda siralama gibi. */
+.kpis b i { font-style:normal; font:11px var(--mono); color:var(--faint); margin-left:7px; }
+.eyebrow { font:10px var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--faint); }
 
 /* ---------- drawer ---------- */
 #drawer {
@@ -381,8 +385,23 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
         <div><small>Dönem getirisi</small><b id="d-ret"></b></div>
         <div><small>Volatilite (yıllık)</small><b id="d-vol"></b></div>
         <div><small>Max düşüş</small><b id="d-mdd"></b></div></div>
+      <div class="kpis" style="margin-bottom:16px">
+        <div><small>Büyüklük</small><b id="d-size"></b></div>
+        <div><small>Yatırımcı sayısı</small><b id="d-inv"></b></div>
+        <div><small>Sınıfındaki payı</small><b id="d-share"></b></div>
+        <div><small>Stopaj oranı</small><b id="d-stopaj"></b></div>
+        <div><small>Yönetim ücreti (yıllık)</small><b id="d-fee"></b></div>
+        <div><small>Alış valörü</small><b id="d-valor"></b></div></div>
       <div class="kpis" id="d-periods" style="margin-bottom:16px"></div>
       <div class="card chartbox"><canvas id="d-chart"></canvas></div>
+      <div style="display:flex;align-items:center;gap:12px;margin:20px 0 10px">
+        <span class="eyebrow">Nakit akışı</span>
+        <div class="seg" id="d-flowseg" style="margin-left:auto">
+          <button class="on" data-flow="daily">Günlük</button>
+          <button data-flow="cum">Kümülatif</button></div>
+      </div>
+      <div class="card chartbox flow"><canvas id="d-flow"></canvas></div>
+      <p class="faint" id="d-flownote" style="font-size:12px;margin:10px 0 0"></p>
     </div>
     <div class="pane" id="d-alloc">
       <p class="faint num" id="d-allocdate" style="font-size:12px;margin:0 0 14px"></p>

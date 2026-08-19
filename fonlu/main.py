@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from pytefas import TefasAPIError, TefasInvalidParameterError, TefasRateLimitError
 
-from . import auth, holdings, kap, store
+from . import auth, holdings, kap, kiid, store
 
 app = FastAPI(title="Fonlu API")
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -270,13 +270,38 @@ def _category(groups: dict) -> Optional[str]:
     return best if groups[best] >= 25 else "Karma"
 
 
+
+def _peer(conn, meta, alloc) -> Optional[dict]:
+    """Fonun kendi sinifi icindeki buyukluk payi ve sirasi.
+
+    Sinif = ayni `kind` + ayni dagilim kategorisi (Hisse Senedi, Para Piyasasi...);
+    `kind` tek basina cok genis, TEFAS ayrica bir fon turu sutunu vermiyor.
+    Payda fonun son fiyat gunuyle kuruluyor: o gun fiyat aciklamayan fon disarida
+    kalir, pay bir miktar yuksek cikar.
+    """
+    size, cat = meta["portfolio_size"], _category(_groups(alloc))
+    if not size or not cat:
+        return None
+    sizes = [r["portfolio_size"] for r in conn.execute(
+        "SELECT p.portfolio_size, b.allocation FROM prices p"
+        " LEFT JOIN breakdown b ON b.fund_code = p.fund_code"
+        " WHERE p.date = %s AND p.kind = %s AND p.portfolio_size > 0",
+        (meta["date"], meta["kind"])).fetchall()
+        if _category(_groups(r["allocation"] or {})) == cat]
+    total = sum(sizes)
+    return {"category": cat, "count": len(sizes),
+            "rank": sum(1 for s in sizes if s > size) + 1,
+            "share_pct": round(size / total * 100, 2) if total else None}
+
+
 @app.get("/api/funds/{code}")
 def fund_detail(code: str, conn: Db, user: User,
                 start: Optional[str] = None, end: Optional[str] = None):
     code = code.upper()
     start, end = _range(start, end)
     series = conn.execute(
-        "SELECT date, price FROM prices WHERE fund_code = %s AND date BETWEEN %s AND %s ORDER BY date",
+        "SELECT date, price, shares_outstanding FROM prices"
+        " WHERE fund_code = %s AND date BETWEEN %s AND %s ORDER BY date",
         (code, start, end),
     ).fetchall()
     if not series:
@@ -323,6 +348,7 @@ def fund_detail(code: str, conn: Db, user: User,
         "groups": _groups(alloc),
         "category": _category(_groups(alloc)),
         "periods": periods,
+        "peer": _peer(conn, meta, alloc),
         **_risk(prices),
         "kap_count": conn.execute(
             "SELECT COUNT(*) c FROM kap_disclosures WHERE fund_code = %s", (code,)
@@ -354,10 +380,8 @@ def kap_attachments(disclosure_index: int, user: User):
     except kap.KapError as exc:
         raise HTTPException(502, str(exc))
     # KAP'in kendi linki PDF'i Java-serialize sarmalayici icinde donduruyor, o
-    # yuzden dosyayi kendi ucumuzden gecirip temiz PDF veriyoruz.
-    return {"attachments": [
-        {**a, "url": f"/api/kap/file/{a['obj_id']}"} for a in atts
-    ]}
+    # yuzden dosyayi /api/kap/file/{obj_id} ucundan gecirip temiz PDF veriyoruz.
+    return {"attachments": atts}
 
 
 @app.get("/api/kap/file/{obj_id}")
@@ -371,6 +395,28 @@ def kap_file(obj_id: str, user: User):
         raise HTTPException(502, str(exc))
     return Response(pdf, media_type="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{obj_id}.pdf"'})
+
+
+@app.get("/api/funds/{code}/form")
+def fund_form(code: str, conn: Db, user: User):
+    """Fonun son Yatirimci Bilgi Formundan stopaj, yonetim ucreti ve alim valoru.
+
+    Ayri uc: PDF indirip ayristirmak birkac saniye suruyor, detay yaniti
+    bunu beklememeli. Arayuz cekmeceyi cizdikten sonra cagiriyor.
+    """
+    row = conn.execute(
+        "SELECT disclosure_index, publish_date FROM kap_disclosures"
+        " WHERE fund_code = %s AND subject = %s AND attachment_count > 0"
+        " ORDER BY publish_date DESC LIMIT 1", (code.upper(), kiid.SUBJECT),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, f"{code.upper()} icin ekli bir yatirimci bilgi formu yok.")
+    try:
+        fields = kiid.fetch(row["disclosure_index"])
+    except kap.KapError as exc:
+        raise HTTPException(502, str(exc))
+    return {**fields, "form_date": row["publish_date"][:10],
+            "disclosure_index": row["disclosure_index"]}
 
 
 def _section_totals(alloc: dict) -> dict:

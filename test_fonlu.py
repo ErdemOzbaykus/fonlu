@@ -168,6 +168,10 @@ assert [f["fund_code"] for f in c.get("/api/funds", params={**R, "min_size": 200
 d = c.get("/api/funds/aaa", params=R).json()
 assert d["allocation"] == {"stock_pct": 92.5} and len(d["series"]) == 3 and d["price"] == 20.0
 assert d["kap_count"] == 1 and d["category"] == "Hisse Senedi"
+# Sinif payi: AAA fikstürdeki tek hisse fonu -> tamami onun, sira 1/1.
+assert d["peer"] == {"category": "Hisse Senedi", "count": 1, "rank": 1, "share_pct": 100.0}, d["peer"]
+# Dagilimi olmayan fonun sinifi da yok; uydurma bir pay uretilmemeli.
+assert c.get("/api/funds/ccc", params=R).json()["peer"] is None
 # 2 daily returns is too little to characterise risk; quote neither figure
 assert d["volatility_pct"] is None and d["max_drawdown_pct"] is None
 # a 90-day window on 3 days of history must not be reported as a 3-month return
@@ -286,6 +290,28 @@ assert main._match(50.0, 0.0) == "yok"
 # be offered as detail -- the headings do not mean the same thing.
 assert main._match(14.14, 94.53) == "eslesmedi"
 assert main._match(85.86, 0.0) == "yok"
+
+# --- yatirimci bilgi formu parseri, gercek form metinleriyle (no network) ---
+from fonlu import kiid as K
+
+FORM = ("Gerçek kişilerin fon katılma payı alım satım kazancı %17,50; tüzel kişilerin fon "
+        "katılma payı alım satım kazancı %0 oranında stopaja tabidir. Yatırımcıların saat "
+        "13:30'a kadar verdikleri katılma payı alım talimatları talimatın verilmesini takip "
+        "eden ilk hesaplamada bulunacak pay fiyatı üzerinden yerine getirilir. Katılma payı "
+        "bedelleri iade talimatının takip eden ikinci işlem gününde ödenir. "
+        "Yıllık azami fon toplam gider oranı 3,65 Yönetim ücreti (yıllık) 1,75 Saklama ücreti 0,14")
+assert K.fields(FORM) == {"stopaj_pct": 17.5, "management_fee_pct": 1.75, "valor_days": 1}, K.fields(FORM)
+# Etiketle sayi arasina dagitim payi parantezi giriyor; okunacak hucre yine ucret.
+assert K.fields("Yönetim ücreti (yıllık) - Kurucu (asgari %35, azami %65) 2,25 - Fon Dağıtım"
+                )["management_fee_pct"] == 2.25
+# US ondalik, ve etiket once duz cumlede geciyor: surum numarasi ucret sanilmamali.
+assert K.fields("Yönetim Ücretini içeren 7.1.2 inci maddesi değiştirilmiştir. "
+                "Yönetim ücreti (yıllık) 2.68* Saklama ücreti (yıllık) 0.084"
+                )["management_fee_pct"] == 2.68
+# Hisse yogun fonda stopaj gercekten %0; eslesmeyen alan uydurulmamali.
+assert K.fields("Gerçek kişilerin fon katılma payı alım satım kazancı %0; tüzel kişilerin"
+                )["stopaj_pct"] == 0.0
+assert K.fields("bos form") == {"stopaj_pct": None, "management_fee_pct": None, "valor_days": None}
 
 # --- parser, on the real report layouts (no network) ---
 from fonlu import holdings as H
