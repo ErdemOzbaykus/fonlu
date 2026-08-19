@@ -38,6 +38,17 @@ docker compose ps
 
 Durdurmak için `docker compose down`.
 
+### Aynı ağdaki başka cihazdan
+
+Konteyner zaten `0.0.0.0:8000`'e bağlı, ekstra ayar yok. Telefon/tablet aynı Wi-Fi'daysa:
+
+```
+http://host.local:8000
+```
+
+`.local` adı çözülmezse (Android bazen çözemiyor) Mac'in IP'sini kullanın:
+`ipconfig getifaddr en0` → `http://192.168.1.12:8000`. IP DHCP ile değişebilir, `.local` değişmez.
+
 ## Veriyi doldur ve güncelle
 
 TEFAS dakikada 6 istek kabul ediyor ve 90 günlük çekim birkaç dakika sürüyor, o yüzden
