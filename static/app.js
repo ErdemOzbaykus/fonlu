@@ -431,6 +431,12 @@ async function openDrawer(code) {
     `<div><small>${k} getiri</small><b class="${cls(v)}">${v == null ? "—" : pct(v)}</b></div>`).join("");
   line("d-chart", d.series.map((r) => r.date), [{ label: d.fund_code, data: d.series.map((r) => r.price) }], "₺");
 
+  $("d-addpos").open = false;
+  $("d-pmsg").textContent = "";
+  $("d-punits").value = "";
+  $("d-pdate").value = d.date;
+  $("d-pprice").value = d.price;
+
   loadForm(code);
   flowData = flowSeries(d.series);
   renderFlow($("d-flowseg").querySelector("button.on").dataset.flow);
@@ -767,6 +773,29 @@ async function drawCompare() {
 }
 
 // ---------------- portfolio ----------------
+// Detay cekmecesinden pozisyon ekleme. Kod cekmecenin basligindan geliyor,
+// not alani yok -- portfoy ekranindaki tam form onun icin duruyor.
+$("d-posform").onsubmit = async (e) => {
+  e.preventDefault();
+  $("d-pmsg").textContent = "";
+  try {
+    await api("/positions", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fund_code: $("d-kod").textContent, units: +$("d-punits").value,
+        buy_date: $("d-pdate").value, buy_price: +$("d-pprice").value,
+      }),
+    });
+    $("d-pmsg").className = "up";
+    $("d-pmsg").textContent = "Portföye eklendi.";
+    $("d-punits").value = "";
+    loadPortfolio();
+  } catch (err) {
+    $("d-pmsg").className = "down";
+    $("d-pmsg").textContent = err.message;
+  }
+};
+
 $("p-form").onsubmit = async (e) => {
   e.preventDefault();
   $("p-msg").textContent = "";
