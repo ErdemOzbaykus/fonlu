@@ -69,6 +69,11 @@ input:focus-visible, select:focus-visible, button:focus-visible {
   outline:2px solid var(--accent); outline-offset:1px;
 }
 input[type=number], input[type=date] { font-family:var(--mono); font-size:12px; }
+#s-min { width:88px; } #s-size { width:110px; } #s-q { width:170px; }
+/* Masaustunde .fields seffaf: alanlar dogrudan .topbar'in flex ogeleri. */
+.fields { display:contents; }
+#periods { order:-1; } .topbar label.wide { order:1; } #s-go { order:2; }
+.filt-btn, .filt-scrim { display:none; }
 .btn {
   background:var(--raised); border:1px solid var(--line); border-radius:5px;
   padding:7px 12px; cursor:pointer;
@@ -281,10 +286,51 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   .btn { padding:10px 14px; }
   .seg button { padding:9px 13px; }
 
-  /* Filtreler tek satirda yatay serit: tablo ekranin disina itilmiyor. */
+  /* Ekranin adi alt cubukta zaten yaziyor, baslik satir yiyor. */
+  .topbar h2 { display:none; }
+  /* Karsilastir: tarihler yan yana, "Fon sec" altta tam genislik. Yatay
+     seritte buton ekranin disinda kaliyordu. */
+  #compare .topbar { display:grid; grid-template-columns:1fr 1fr; gap:10px; overflow:visible; }
+  #compare .topbar input { width:100%; }
+  #c-pick { grid-column:span 2; padding:12px; }
+
+  /* Filtreler: ust cubukta sadece donem + "Filtre"; gerisi alttan acilan
+     sayfada. Sekiz alan yan yana durunca listeye yer kalmiyordu. */
   .topbar { flex-wrap:nowrap; overflow-x:auto; gap:8px; padding:10px 12px; }
   .topbar > * { flex:0 0 auto; }
   h2 { margin-right:4px; }
+  #scan .topbar { overflow:visible; }
+  /* Ust cubuk: arama tam genislik + Filtre. Baslik yazisi yerine placeholder. */
+  #scan .topbar label.wide { order:0; flex:1 1 auto; min-width:0; }
+  #scan .topbar label.wide > span { display:none; }
+  #scan .topbar #s-q { width:100%; }
+  #periods { grid-column:span 2; }
+  #periods button { flex:1; padding:11px 8px; }
+  .filt-btn {
+    display:block; margin-left:auto; padding:9px 13px; border:1px solid var(--line);
+    border-radius:5px; background:var(--raised); color:var(--paper); cursor:pointer;
+    white-space:nowrap;
+  }
+  #filt-t:checked ~ .filt-btn { border-color:var(--accent); color:var(--accent); }
+  .filt-scrim { position:fixed; inset:0; z-index:44; background:#0009; }
+  #filt-t:checked ~ .filt-scrim { display:block; }
+  .fields {
+    display:none; position:fixed; left:0; right:0; bottom:0; z-index:45;
+    grid-template-columns:1fr 1fr; gap:13px 10px; align-items:end;
+    max-height:85dvh; overflow:auto;
+    padding:22px 14px calc(16px + env(safe-area-inset-bottom));
+    background:var(--surface); border-top:1px solid var(--line);
+    border-radius:14px 14px 0 0; box-shadow:0 -18px 40px #0009;
+  }
+  #filt-t:checked ~ .fields { display:grid; }
+  /* Tutamak: ayri bir eleman koymaya degmez. */
+  .fields::before {
+    content:""; order:-2; grid-column:span 2; justify-self:center; width:38px;
+    height:4px; border-radius:2px; background:var(--line); margin:-12px 0 2px;
+  }
+  .fields label.f > input, .fields label.f > select,
+  .fields #s-min, .fields #s-size { width:100%; }
+  #s-go { grid-column:span 2; margin-top:4px; padding:13px; }
 
   /* --- tablolar: satir = kart --- */
   /* tr grid olunca tablo kutusu icerige gore buyuyup satiri ekrandan tasiriyor;
@@ -397,21 +443,28 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   <!-- ============ FONLAR ============ -->
   <section id="scan" class="view active">
     <div class="topbar">
-      <div class="seg" id="periods">
-        <button data-months="1" class="on">1A</button><button data-months="3">3A</button>
-        <button data-months="6">6A</button><button data-months="12">1Y</button>
+      <!-- Telefonda ust cubukta arama + "Filtre" durur, donem secici sayfanin
+           icine gider; masaustu sirasi CSS order ile korunuyor. -->
+      <label class="f wide"><span>Ara</span><input id="s-q" placeholder="kod veya fon adı"></label>
+      <input type="checkbox" id="filt-t" hidden>
+      <label class="filt-btn" for="filt-t">Filtre ▾</label>
+      <label class="filt-scrim" for="filt-t" aria-hidden="true"></label>
+      <div class="fields">
+        <div class="seg" id="periods">
+          <button data-months="1" class="on">1A</button><button data-months="3">3A</button>
+          <button data-months="6">6A</button><button data-months="12">1Y</button>
+        </div>
+        <label class="f"><span>Başlangıç</span><input type="date" id="s-start"></label>
+        <label class="f"><span>Bitiş</span><input type="date" id="s-end"></label>
+        <label class="f"><span>Fon tipi</span><select id="s-kind">
+          <option value="">Hepsi</option><option value="YAT">Yatırım</option>
+          <option value="EMK">Emeklilik</option><option value="BYF">Borsa yatırım</option>
+        </select></label>
+        <label class="f"><span>Varlık sınıfı</span><select id="s-cat"><option value="">Hepsi</option></select></label>
+        <label class="f"><span>Min getiri %</span><input type="number" id="s-min"></label>
+        <label class="f"><span>Min büyüklük ₺</span><input type="number" id="s-size" placeholder="0"></label>
+        <button class="btn primary" id="s-go">Filtrele</button>
       </div>
-      <label class="f"><span>Başlangıç</span><input type="date" id="s-start"></label>
-      <label class="f"><span>Bitiş</span><input type="date" id="s-end"></label>
-      <label class="f"><span>Fon tipi</span><select id="s-kind">
-        <option value="">Hepsi</option><option value="YAT">Yatırım</option>
-        <option value="EMK">Emeklilik</option><option value="BYF">Borsa yatırım</option>
-      </select></label>
-      <label class="f"><span>Varlık sınıfı</span><select id="s-cat"><option value="">Hepsi</option></select></label>
-      <label class="f"><span>Min getiri %</span><input type="number" id="s-min" style="width:88px"></label>
-      <label class="f"><span>Min büyüklük ₺</span><input type="number" id="s-size" style="width:110px" placeholder="0"></label>
-      <label class="f"><span>Ara</span><input id="s-q" placeholder="kod veya fon adı" style="width:170px"></label>
-      <button class="btn primary" id="s-go">Filtrele</button>
     </div>
     <div class="body">
       <table id="s-table">

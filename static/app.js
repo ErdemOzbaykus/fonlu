@@ -289,6 +289,7 @@ function renderFunds() {
 $("s-more").onclick = () => { shown += PAGE * 4; renderFunds(); };
 
 async function loadFunds() {
+  $("filt-t").checked = false;  // telefondaki filtre sayfasi acik kaldiysa kapansin
   const p = new URLSearchParams({ start: $("s-start").value, end: $("s-end").value });
   for (const [key, el] of [["kind", "s-kind"], ["category", "s-cat"],
                            ["min_return", "s-min"], ["min_size", "s-size"], ["q", "s-q"]]) {
@@ -820,7 +821,7 @@ async function loadPortfolio() {
     <div><small>Güncel değer</small><b>${num(d.total_value)} ₺</b></div>
     <div><small>Kar / zarar</small><b class="${cls(d.total_profit)}">${num(d.total_profit)} ₺</b></div>
     <div><small>Getiri</small><b class="${cls(d.total_profit_pct)}">${pct(d.total_profit_pct)}</b></div>`;
-  $("p-rows").innerHTML = d.positions.map((p) => `<tr>
+  $("p-rows").innerHTML = d.positions.map((p) => `<tr class="clickable" data-code="${p.fund_code}">
     <td class="l"><span class="kod">${p.fund_code}</span></td>
     <td class="l name" title="${esc(p.fund_name || "")}">${esc(p.fund_name || "—")}</td>
     <td class="num">${num(p.units, 4)}</td><td class="num">${num(p.buy_price, 6)}</td>
@@ -833,10 +834,10 @@ async function loadPortfolio() {
 }
 $("p-rows").onclick = async (e) => {
   const b = e.target.closest("button[data-del]");
-  if (b && confirm("Pozisyon silinsin mi?")) {
-    await api(`/positions/${b.dataset.del}`, { method: "DELETE" });
-    loadPortfolio();
-  }
+  if (!b) return rowClick(e);  // silme disindaki her yer detayi acar
+  if (!confirm("Pozisyon silinsin mi?")) return;
+  await api(`/positions/${b.dataset.del}`, { method: "DELETE" });
+  loadPortfolio();
 };
 
 // ---------------- init ----------------
