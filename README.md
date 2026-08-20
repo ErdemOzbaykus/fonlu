@@ -46,6 +46,10 @@ Konteyner zaten `0.0.0.0:8000`'e bağlı, ekstra ayar yok. Telefon/tablet aynı 
 http://host.local:8000
 ```
 
+Ekran 700 px'in altındaysa arayüz telefon düzenine geçer: sol ray alta sekme
+çubuğu olur (durum/güncelle/çıkış `⋯` altında), tablo satırları kart olur, fon
+listesinin başlık satırı yatay kaydırılan sıralama şeridine döner.
+
 `.local` adı çözülmezse (Android bazen çözemiyor) Mac'in IP'sini kullanın:
 `ipconfig getifaddr en0` → `http://192.168.1.12:8000`. IP DHCP ile değişebilir, `.local` değişmez.
 

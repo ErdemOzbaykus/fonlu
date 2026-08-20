@@ -2,7 +2,7 @@
 <html lang="tr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fonlu — TEFAS Fon Terminali</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
         integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4"
@@ -46,6 +46,7 @@ button, input, select { font:inherit; color:inherit; }
 #rail nav button.active { color:var(--paper); border-left-color:var(--accent); background:#ffffff0d; }
 #rail nav button i { font-style:normal; font:11px var(--mono); color:var(--faint); width:16px; }
 #rail nav button.active i { color:var(--accent); }
+.more-btn { display:none; }
 .rail-foot { margin-top:auto; padding:16px 20px 0; border-top:1px solid var(--line); }
 .rail-foot p { margin:0 0 10px; font:11px/1.5 var(--mono); color:var(--faint); }
 .rail-foot b { color:var(--dim); font-weight:400; }
@@ -130,6 +131,8 @@ tbody tr:hover .kod { border-color:var(--accent); color:var(--accent); }
 .kpis > div { background:var(--surface); padding:13px 15px; }
 .kpis small { display:block; font:10px var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--faint); }
 .kpis b { display:block; font:400 21px var(--mono); font-variant-numeric:tabular-nums; margin-top:5px; letter-spacing:-.02em; }
+#s-more { display:block; margin:14px auto 24px; }
+#s-more[hidden] { display:none; }
 .empty { padding:40px 20px; text-align:center; color:var(--faint); }
 /* maintainAspectRatio:false means the container owns the height. */
 .chartbox { position:relative; height:340px; }
@@ -236,6 +239,126 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   .brand b, .brand span, #rail nav button b, .rail-foot { display:none; }
   #rail nav button { justify-content:center; padding:12px 0; }
 }
+
+/* ================= TELEFON =================
+   Ayni DOM, farkli yerlesim: sol ray alt sekmeye, tablolar karta doner.
+   Tek CSS katmani; JS'in tablo/rail hakkinda bilgisi yok, oyle kalsin. */
+@media (max-width:700px) {
+  /* --- alt sekme cubugu --- */
+  #rail {
+    position:fixed; left:0; right:0; bottom:0; z-index:40; width:auto; flex:0 0 auto;
+    flex-direction:row; align-items:stretch; padding:0 0 env(safe-area-inset-bottom);
+    border-right:0; border-top:1px solid var(--line);
+  }
+  .brand { display:none; }
+  #rail nav { flex:1; flex-direction:row; }
+  #rail nav button {
+    flex:1; min-width:0; flex-direction:column; justify-content:center; gap:0;
+    padding:10px 2px; border-left:0; border-top:2px solid transparent;
+  }
+  #rail nav button.active { border-left-color:transparent; border-top-color:var(--accent); }
+  #rail nav button i { display:none; }
+  #rail nav button b { display:block; font:500 10px var(--sans); letter-spacing:-.01em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  /* Durum + guncelle + cikis: cubuktaki ⋯ ile acilan kucuk sayfa. Checkbox
+     yeterli, JS'e gerek yok. */
+  .more-btn { display:flex; align-items:center; padding:0 18px; cursor:pointer;
+    color:var(--dim); font-size:20px; border-left:1px solid var(--line); }
+  #more-t:checked ~ .more-btn { color:var(--accent); background:#ffffff0d; }
+  .rail-foot {
+    display:none; position:fixed; left:0; right:0; z-index:41;
+    bottom:calc(57px + env(safe-area-inset-bottom));
+    background:var(--surface); border-top:1px solid var(--line); padding:14px 16px;
+  }
+  #more-t:checked ~ .rail-foot { display:block; }
+
+  /* --- govde --- */
+  .body { padding-bottom:calc(64px + env(safe-area-inset-bottom)); }
+  .pad { padding:14px; }
+  .empty { padding:30px 16px; }
+  /* iOS 16px'in altindaki alanlara odaklaninca sayfayi zumluyor. */
+  input, select, input[type=number], input[type=date] { font-size:16px; padding:8px 10px; }
+  .btn { padding:10px 14px; }
+  .seg button { padding:9px 13px; }
+
+  /* Filtreler tek satirda yatay serit: tablo ekranin disina itilmiyor. */
+  .topbar { flex-wrap:nowrap; overflow-x:auto; gap:8px; padding:10px 12px; }
+  .topbar > * { flex:0 0 auto; }
+  h2 { margin-right:4px; }
+
+  /* --- tablolar: satir = kart --- */
+  /* tr grid olunca tablo kutusu icerige gore buyuyup satiri ekrandan tasiriyor;
+     tablo/tbody blok olunca genislik konteynerin. */
+  #s-table, #w-table, #portfolio table,
+  #s-table tbody, #w-table tbody, #p-rows { display:block; width:100%; }
+  /* Fonlar'da baslik satiri siralama seridi olarak kaliyor; digerlerinde gizli. */
+  #s-table thead, #s-table thead tr { display:flex; }
+  #s-table thead { overflow-x:auto; position:sticky; top:0; z-index:2;
+    background:var(--surface); border-bottom:1px solid var(--line); }
+  #s-table thead th { position:static; border:0; flex:0 0 auto; padding:10px 11px; }
+  #s-table thead th:not(.sortable) { display:none; }
+  #w-table thead, #portfolio thead { display:none; }
+
+  /* 6 esit sutun: ust satir kod/ad/yildiz, alt satirlarda sayilar ikiser
+     sutun kaplayip ucerli esit dizilir. auto sutun kullaninca 1fr olan orta
+     sutun sayilari saga savuruyordu. */
+  #s-table tbody tr, #w-table tbody tr, #p-rows tr {
+    display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:9px 10px;
+    padding:13px 14px; border-bottom:1px solid var(--line);
+  }
+  #s-table tbody td:nth-child(n+6), #w-table tbody td:nth-child(n+6),
+  #p-rows td:nth-child(n+3):nth-child(-n+9) { grid-column:span 2; }
+  #s-table td, #w-table td, #p-rows td {
+    border:0; padding:0; text-align:left; align-self:center;
+  }
+  #s-table td.name, #w-table td.name, #p-rows td.name {
+    width:auto; max-width:100%; grid-area:1/2/auto/6;
+  }
+  #s-table tbody td.star-cell, #w-table tbody td.star-cell {
+    width:auto; grid-area:1/6/auto/7; text-align:right;
+  }
+  .star { font-size:20px; padding:4px; }
+  #s-table tbody td:nth-child(2), #w-table tbody td:nth-child(2) { grid-area:1/1; }
+  #s-table tbody td:nth-child(4), #w-table tbody td:nth-child(4) { grid-area:2/1/auto/4; }
+  #s-table tbody td:nth-child(5), #w-table tbody td:nth-child(5) { grid-area:2/4/auto/7; }
+  #p-rows td:nth-child(1) { grid-area:1/1; }
+  #p-rows td:nth-child(10) { grid-area:1/6/auto/7; text-align:right; }
+  /* Basliklar gizli oldugu icin etiketi sutun sirasindan uretiyoruz. */
+  #s-table tbody td:nth-child(n+6)::before, #w-table tbody td:nth-child(n+6)::before,
+  #p-rows td:nth-child(n+3):nth-child(-n+9)::before {
+    display:block; font:9px var(--mono); letter-spacing:.08em; text-transform:uppercase;
+    color:var(--faint); margin-bottom:2px;
+  }
+  #s-table tbody td:nth-child(6)::before, #w-table tbody td:nth-child(6)::before { content:"Fiyat"; }
+  #s-table tbody td:nth-child(7)::before, #w-table tbody td:nth-child(7)::before { content:"Günlük"; }
+  #s-table tbody td:nth-child(8)::before, #w-table tbody td:nth-child(8)::before { content:"Getiri"; }
+  #s-table tbody td:nth-child(9)::before, #w-table tbody td:nth-child(9)::before { content:"Büyüklük"; }
+  #s-table tbody td:nth-child(10)::before, #w-table tbody td:nth-child(10)::before { content:"Yatırımcı"; }
+  #p-rows td:nth-child(3)::before { content:"Adet"; }
+  #p-rows td:nth-child(4)::before { content:"Alış"; }
+  #p-rows td:nth-child(5)::before { content:"Son"; }
+  #p-rows td:nth-child(6)::before { content:"Maliyet ₺"; }
+  #p-rows td:nth-child(7)::before { content:"Değer ₺"; }
+  #p-rows td:nth-child(8)::before { content:"K/Z ₺"; }
+  #p-rows td:nth-child(9)::before { content:"K/Z %"; }
+  #s-more { width:calc(100% - 28px); }
+
+  /* --- kartlar / grafikler --- */
+  .kpis { grid-template-columns:repeat(2,1fr); }
+  .kpis b { font-size:18px; }
+  .chartbox { height:240px; }
+  #d-overview .chartbox { height:200px; }
+  #d-alloc .chartbox { height:200px; }
+  #d-overview .chartbox.flow { height:150px; }
+
+  /* --- cekmece / secici tam ekran --- */
+  #drawer { width:100%; border-left:0; }
+  .drawer-head { padding:14px; }
+  .tabs { padding:0; }
+  .tabs button { flex:1; padding:12px 4px; font-size:12px; }
+  .picker-box { width:100vw; height:100dvh; max-height:none; border-radius:0; }
+  .picker-list label { padding:12px 16px; }
+}
 </style>
 </head>
 <body>
@@ -261,6 +384,8 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
     <button data-view="compare"><i>03</i><b>Karşılaştır</b></button>
     <button data-view="portfolio"><i>04</i><b>Portföy</b></button>
   </nav>
+  <input type="checkbox" id="more-t" hidden>
+  <label class="more-btn" for="more-t" title="Daha fazla">⋯</label>
   <div class="rail-foot">
     <p id="status">Yükleniyor…</p>
     <button class="btn ghost" id="refresh" style="width:100%">Veriyi güncelle</button>
@@ -305,8 +430,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
         <tbody id="s-rows"></tbody>
       </table>
       <div class="empty" id="s-empty" hidden></div>
-      <button class="btn ghost" id="s-more" hidden
-              style="display:block;margin:14px auto 24px"></button>
+      <button class="btn ghost" id="s-more" hidden></button>
     </div>
   </section>
 
