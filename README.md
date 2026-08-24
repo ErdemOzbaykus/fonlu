@@ -41,7 +41,14 @@ Durdurmak için `docker compose down`.
 ### Hazır imajı başka makinede çalıştırma
 
 `docker push`/`pull` sadece imajı taşır; `.env` (şifre içerdiği için) imaja hiç
-girmiyor. Pull ettiğin makinede şablonu imajın içinden çıkarıp elle doldur:
+girmiyor. Apple Silicon'da build edilen imaj arm64 olur ve amd64 makinede `no matching
+manifest` der; Windows/Linux PC için imajı Mac'te şöyle üret:
+
+```bash
+docker build --platform linux/amd64 -t kullaniciadi/fonlu:latest . && docker push kullaniciadi/fonlu:latest
+```
+
+Pull ettiğin makinede şablonu imajın içinden çıkarıp elle doldur:
 
 ```bash
 docker create --name fonlu-tmp kullaniciadi/fonlu:latest && docker cp fonlu-tmp:/app/.env.example .env && docker rm fonlu-tmp
