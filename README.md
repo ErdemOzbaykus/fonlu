@@ -44,13 +44,16 @@ Durdurmak için `docker compose down`.
 girmiyor. Pull ettiğin makinede şablonu imajın içinden çıkarıp elle doldur:
 
 ```bash
-docker create --name fonlu-tmp IMAJ && docker cp fonlu-tmp:/app/.env.example .env && docker rm fonlu-tmp
+docker create --name fonlu-tmp kullaniciadi/fonlu:latest && docker cp fonlu-tmp:/app/.env.example .env && docker rm fonlu-tmp
 ```
+
+(`kullaniciadi/fonlu:latest` yerine kendi imaj adin; `docker images` ile bakabilirsin.
+Docker imaj adlari kucuk harf olmak zorunda.)
 
 `.env`'i doldurduktan sonra:
 
 ```bash
-docker run -d --name fonlu --env-file .env -p 8000:8000 IMAJ
+docker run -d --name fonlu --env-file .env -p 8000:8000 kullaniciadi/fonlu:latest
 ```
 
 Değişkenler eksikse konteyner açılışta `DATABASE_URL tanimli degil` diyip duruyor —
