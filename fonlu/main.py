@@ -2,6 +2,7 @@
 talks to TEFAS, and it does so in the background."""
 
 import calendar
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -16,6 +17,13 @@ from pytefas import TefasAPIError, TefasInvalidParameterError, TefasRateLimitErr
 from . import auth, holdings, kap, kiid, store
 
 app = FastAPI(title="Fonlu API")
+
+# Env eksikse ilk istekte KeyError -> govdesi JSON olmayan 500 doner ve
+# frontend "is not valid JSON" der. Baslangicta patlasin, sebep loglarda gorunsun.
+for _var in ("DATABASE_URL", "SUPABASE_URL"):
+    if not os.environ.get(_var):
+        raise RuntimeError(f"{_var} tanimli degil: .env dosyasini konteynere verin.")
+
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
 refresh_state = {"running": False, "log": [], "error": None}

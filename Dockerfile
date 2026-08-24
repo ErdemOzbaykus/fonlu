@@ -11,6 +11,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pull edip .env'i elle doldurabilmek icin sablon imajda dursun:
+#   docker cp fonlu:/app/.env.example .env
+COPY .env.example .
+
 COPY fonlu/ fonlu/
 COPY static/ static/
 COPY scripts/ scripts/

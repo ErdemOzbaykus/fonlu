@@ -38,6 +38,24 @@ docker compose ps
 
 Durdurmak için `docker compose down`.
 
+### Hazır imajı başka makinede çalıştırma
+
+`docker push`/`pull` sadece imajı taşır; `.env` (şifre içerdiği için) imaja hiç
+girmiyor. Pull ettiğin makinede şablonu imajın içinden çıkarıp elle doldur:
+
+```bash
+docker create --name fonlu-tmp IMAJ && docker cp fonlu-tmp:/app/.env.example .env && docker rm fonlu-tmp
+```
+
+`.env`'i doldurduktan sonra:
+
+```bash
+docker run -d --name fonlu --env-file .env -p 8000:8000 IMAJ
+```
+
+Değişkenler eksikse konteyner açılışta `DATABASE_URL tanimli degil` diyip duruyor —
+`docker logs fonlu` ile görünür.
+
 ### Aynı ağdaki başka cihazdan
 
 Konteyner zaten `0.0.0.0:8000`'e bağlı, ekstra ayar yok. Telefon/tablet aynı Wi-Fi'daysa:

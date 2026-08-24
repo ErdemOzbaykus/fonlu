@@ -5,6 +5,8 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+# gercek .env asla imaja girmesin (sifre iceriyor); sablonu COPY ile aliniyor
+.env
 .git/
 .claude/
 .DS_Store
