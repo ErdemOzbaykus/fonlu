@@ -2,7 +2,7 @@
 Run: docker compose --profile test run --rm tests   (no TEFAS calls)"""
 
 import os
-from datetime import date
+from datetime import date, datetime
 from uuid import uuid4
 
 import psycopg
@@ -86,7 +86,7 @@ def build_periods_client():
     """A fund whose history starts on Mon 2026-05-18 and ends Fri 2026-08-14 --
     exactly the 90-day seed shape, where the 3-month cutoff (2026-05-16) is a
     Saturday and so falls before the first price that exists."""
-    from datetime import date, timedelta
+    from datetime import date, datetime, timedelta
     schema = fresh_schema()
     day, end, rows = date(2026, 5, 18), date(2026, 8, 14), []
     price = 10.0
@@ -155,6 +155,19 @@ assert [f["fund_code"] for f in c.get("/api/funds", params={**R, "min_return": 0
 assert [f["fund_code"] for f in c.get("/api/funds", params={**R, "max_return": -1}).json()["funds"]] == ["BBB"]
 assert [f["fund_code"] for f in c.get("/api/funds", params={**R, "q": "BB"}).json()["funds"]] == ["BBB"]
 assert c.get("/api/funds", params={"start": "2026-08-31", "end": "2026-08-01"}).status_code == 400
+
+# Tarama sonucu surec ici onbellekte duruyor; yeni bir fiyat gunu gelince
+# onbellek son fiyat gunune bagli oldugu icin kendiliginden gecersiz kalmali,
+# yoksa /api/refresh sonrasi liste bir gun geride takili kalir.
+with connect_test(SCHEMA) as cn:
+    cn.execute("INSERT INTO prices (fund_code,date,kind,fund_name,price,portfolio_size,"
+               "investor_count) VALUES ('AAA','2026-08-13','YAT','Test AAA',30.0,1000,10)")
+    cn.commit()
+assert {f["fund_code"]: f["return_pct"] for f in
+        c.get("/api/funds", params=R).json()["funds"]}["AAA"] == 200.0, "onbellek bayat"
+with connect_test(SCHEMA) as cn:
+    cn.execute("DELETE FROM prices WHERE fund_code='AAA' AND date='2026-08-13'")
+    cn.commit()
 
 # derived category + grouped allocation drive the table's bar and the filter
 assert by["AAA"]["category"] == "Hisse Senedi", by["AAA"]
@@ -242,6 +255,29 @@ assert c.get("/api/positions").json()["positions"] == [], "B, A'nin pozisyonlari
 _who["id"] = USER_A
 assert c.get("/api/watchlist").json()["codes"] == ["BBB"], "A'nin listesi B'den etkilendi"
 assert c.get("/api/positions").json()["total_cost"] == 100.0
+
+# Bildirim kutusu: yalnizca takip edilen/portfoydeki fonlarin KAP kayitlari,
+# ve yalnizca istegi yapan kullaniciya ait olanlar.
+assert c.get("/api/notifications").json()["disclosures"] == [], "BBB'nin bildirimi yok"
+c.put("/api/watchlist/AAA")
+n = c.get("/api/notifications").json()["disclosures"]
+assert [x["disclosure_index"] for x in n] == [999], n
+assert n[0]["fund_code"] == "AAA" and n[0]["url"].endswith("/Bildirim/999")
+_who["id"] = USER_B
+assert c.get("/api/notifications").json()["disclosures"] == [], "B, A'nin bildirimlerini goruyor"
+_who["id"] = USER_A
+c.delete("/api/watchlist/AAA")
+
+# Detaydaki gunluk getiri son iki islem gunu arasi; tek fiyatli fonda yok.
+assert c.get("/api/funds/AAA", params=R).json()["daily_pct"] == 33.33   # 15 -> 20
+assert c.get("/api/funds/CCC", params=R).json()["daily_pct"] is None
+
+# Zamanlayici her saatin 5'inde uyanir; 10:05 tam senkron, digerleri yalniz KAP.
+_n = lambda h, m: main._next_wake(datetime(2026, 8, 26, h, m, tzinfo=main.TZ))
+assert _n(9, 50) == datetime(2026, 8, 26, 10, 5, tzinfo=main.TZ)
+assert _n(10, 5).hour == 11, "tam saatin 5'inde bir sonraki saate atlamali"
+assert _n(23, 30) == datetime(2026, 8, 27, 0, 5, tzinfo=main.TZ), "gun sinirini gecmeli"
+assert _n(9, 50).hour == main.SYNC_HOUR and _n(11, 50).hour != main.SYNC_HOUR
 
 h = c.get("/api/funds/AAA/holdings").json()
 assert h["reports"] == [] and h["sections"] == {}

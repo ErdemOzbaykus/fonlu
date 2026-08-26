@@ -41,6 +41,18 @@ async function refresh() {
   }
 }
 
+// Perde ancak is 250 ms'yi asarsa aciliyor: onbellekten donen 80 ms'lik
+// istekte ekranin bir anlik parlamasi, beklemeden daha rahatsiz edici.
+let busyN = 0, busyTimer;
+async function busy(work) {
+  // Sayac sart: acilis kendi icinde loadFunds'i cagiriyor, ic cagrinin bitisi
+  // dis cagri surerken perdeyi indirmemeli.
+  if (busyN++ === 0) busyTimer = setTimeout(() => $("loading").hidden = false, 250);
+  try { return await work; } finally {
+    if (--busyN === 0) { clearTimeout(busyTimer); $("loading").hidden = true; }
+  }
+}
+
 const api = async (path, opts = {}, retry = true) => {
   const s = session.get();
   const headers = { ...opts.headers };
@@ -181,10 +193,18 @@ document.querySelectorAll("#rail nav button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("#rail nav button, .view").forEach((e) => e.classList.remove("active"));
   b.classList.add("active");
   $(b.dataset.view).classList.add("active");
+  // Telefonda ⋯ sayfasi (guncelle/cikis) ve filtre sayfasi acik kalmasin:
+  // baska bir sekmeye gecen kullanici onlari kapatmis sayilir.
+  closeSheets();
   if (b.dataset.view === "portfolio") loadPortfolio();
   if (b.dataset.view === "saved") renderSaved();
+  if (b.dataset.view === "notify") loadNotifications();
   Object.values(charts).forEach((c) => c.resize());
 });
+
+const closeSheets = () => { $("more-t").checked = false; $("filt-t").checked = false; };
+// Filtre sayfasi acilirken de ⋯ kapansin; ikisi ust uste binmesin.
+$("filt-t").onchange = (e) => { if (e.target.checked) $("more-t").checked = false; };
 
 // ---------------- status ----------------
 let statusTimer;
@@ -198,6 +218,7 @@ async function loadStatus() {
     $("status").innerHTML =
       `<b>${int(s.funds)}</b> fon · <b>${int(s.kap)}</b> KAP<br>son veri <b>${s.last_date || "yok"}</b><br>${tail}`;
     if (s.refresh.running) statusTimer = setTimeout(loadStatus, 3000);
+    return s;
   } catch { $("status").textContent = "API'ye ulaşılamıyor."; }
 }
 $("refresh").onclick = async () => {
@@ -298,7 +319,7 @@ async function loadFunds() {
   $("s-empty").hidden = false;
   $("s-empty").textContent = "Yükleniyor…";
   try {
-    const d = await api("/funds?" + p);
+    const d = await busy(api("/funds?" + p));
     funds = d.funds;
     shown = PAGE;  // yeni filtre, sayfalama başa dönsün
     if ($("s-cat").options.length === 1) {
@@ -418,7 +439,9 @@ async function openDrawer(code) {
 
   $("d-name").textContent = d.fund_name;
   $("d-cat").textContent = [d.kind, d.category].filter(Boolean).join(" · ");
-  $("d-price").textContent = num2(d.price);
+  // Gunluk degisim fiyatin yanina: 5. kutu izgarada bos hucre birakiyordu,
+  // "Sinifindaki payi"nda zaten kullanilan ikincil deger kalibi burada da isliyor.
+  $("d-price").innerHTML = `${num2(d.price)}<i class="${cls(d.daily_pct)}">${pct(d.daily_pct)}</i>`;
   $("d-vol").textContent = d.volatility_pct == null ? "—" : num(d.volatility_pct) + "%";
   for (const [id, v] of [["d-ret", d.return_pct], ["d-mdd", d.max_drawdown_pct]]) {
     $(id).textContent = pct(v);
@@ -437,6 +460,7 @@ async function openDrawer(code) {
   $("d-punits").value = "";
   $("d-pdate").value = d.date;
   $("d-pprice").value = d.price;
+  showPosSummary(code);
 
   loadForm(code);
   flowData = flowSeries(d.series);
@@ -691,6 +715,47 @@ $("d-kaplist").onclick = async (e) => {
   }
 };
 
+// ---------------- KAP bildirimleri ----------------
+// KAP'in push/websocket ucu yok: sunucu her saatin 5'inde KAP'i yokluyor, burasi
+// da o onbellegi okuyor. Okundu isareti cihazda -- gorulen en buyuk bildirim
+// numarasi yetiyor, sunucuda kullanici basina tablo acmaya degmez.
+const seen = {
+  get: () => +localStorage.getItem("fonlu-seen") || 0,
+  set: (n) => localStorage.setItem("fonlu-seen", n),
+};
+let notices = [];
+
+function renderNotifications() {
+  const mark = seen.get();
+  $("n-list").innerHTML = notices.map((x) => `<div class="discl">
+    <a href="${x.url}" target="_blank" rel="noopener noreferrer">${esc(x.subject || "Bildirim")}</a>
+    ${x.disclosure_index > mark ? '<span class="tag">yeni</span>' : ""}
+    <p><span class="kod">${x.fund_code}</span> · ${x.publish_date.slice(0, 16)}${
+      x.summary ? " · " + esc(x.summary.trim().slice(0, 140)) : ""}</p>
+  </div>`).join("");
+  $("n-empty").hidden = notices.length > 0;
+  $("n-empty").textContent = "Takip ettiğin ya da portföyündeki fonlar için bildirim yok.";
+  const fresh = notices.filter((x) => x.disclosure_index > mark).length;
+  $("n-badge").hidden = !fresh;
+  $("n-badge").textContent = fresh > 99 ? "99+" : fresh;
+}
+
+async function loadNotifications() {
+  try { notices = (await api("/notifications")).disclosures; }
+  catch (e) {
+    $("n-list").innerHTML = "";
+    $("n-empty").hidden = false;
+    $("n-empty").innerHTML = `<span class="down">${esc(e.message)}</span>`;
+    return;
+  }
+  renderNotifications();
+}
+
+$("n-seen").onclick = () => {
+  if (notices.length) seen.set(Math.max(...notices.map((x) => x.disclosure_index)));
+  renderNotifications();
+};
+
 // ---------------- compare ----------------
 let picked = [];
 
@@ -790,7 +855,8 @@ $("d-posform").onsubmit = async (e) => {
     $("d-pmsg").className = "up";
     $("d-pmsg").textContent = "Portföye eklendi.";
     $("d-punits").value = "";
-    loadPortfolio();
+    await loadPortfolio();
+    showPosSummary($("d-kod").textContent);
   } catch (err) {
     $("d-pmsg").className = "down";
     $("d-pmsg").textContent = err.message;
@@ -814,8 +880,31 @@ $("p-form").onsubmit = async (e) => {
   } catch (err) { $("p-msg").textContent = err.message; }
 };
 
+// Cekmecedeki ozet ayni veriden besleniyor; portfoy her yuklendiginde tazeleniyor.
+let myPositions = null;
+
+/** Fon portfoydeyse ekleme formunun ustunde tek satirlik ozet gosterir. */
+function showPosSummary(code) {
+  const mine = (myPositions || []).filter((p) => p.fund_code === code);
+  $("d-possum").hidden = !mine.length;
+  if (!mine.length) return;
+  const sum = (f) => mine.reduce((a, p) => a + (f(p) || 0), 0);
+  const units = sum((p) => p.units), cost = sum((p) => p.cost), value = sum((p) => p.value);
+  // Deger ancak son fiyat varsa dolu; yoksa K/Z uydurmak yerine "—" kalsin.
+  const has = mine.every((p) => p.value != null);
+  const profit = has ? value - cost : null;
+  $("d-possum").innerHTML = `
+    <div><span>Portföyde</span><b>${num(units, 4)} adet</b></div>
+    <div><span>Maliyet</span><b>${num(cost)} ₺</b></div>
+    <div><span>Değer</span><b>${has ? num(value) + " ₺" : "—"}</b></div>
+    <div><span>K/Z</span><b class="${cls(profit)}">${profit == null ? "—" : num(profit) + " ₺"}</b></div>
+    <div><span>Getiri</span><b class="${cls(profit)}">${pct(cost ? (profit / cost) * 100 : null)}</b></div>`;
+  $("d-addpos").open = true;
+}
+
 async function loadPortfolio() {
   const d = await api("/positions");
+  myPositions = d.positions;
   $("p-kpi").innerHTML = `
     <div><small>Maliyet</small><b>${num(d.total_cost)} ₺</b></div>
     <div><small>Güncel değer</small><b>${num(d.total_value)} ₺</b></div>
@@ -844,13 +933,19 @@ $("p-rows").onclick = async (e) => {
 async function boot() {
   // Dönem alanları piyasadaki son veri gününe göre kurulmalı; bunun için status
   // beklenir, yoksa 1A dönemi bugüne göre kurulup TEFAS'la kayıyor.
-  try { lastDataDate = (await api("/status")).last_date || lastDataDate; } catch { /* varsayılan */ }
-  applyPeriod(1);
-  $("c-end").value = lastDataDate;
-  $("c-start").value = monthsBack(lastDataDate, 3);
-  loadStatus();
-  await loadWatchlist();
-  loadFunds();
+  // Tek /status yetiyor: hem rozeti dolduruyor hem son veri gununu veriyor.
+  // Iki ayri cagri acilisa bos yere bir tur daha ekliyordu.
+  await busy((async () => {
+    lastDataDate = (await loadStatus())?.last_date || lastDataDate;
+    applyPeriod(1);
+    $("c-end").value = lastDataDate;
+    $("c-start").value = monthsBack(lastDataDate, 3);
+    await loadWatchlist();
+    await loadFunds();
+  })());
+  // Rozet ve cekmecedeki portfoy ozeti icin; acilisi bekletmiyorlar.
+  loadNotifications();
+  loadPortfolio();
 }
 
 // ---------------- giriş kapısı ----------------

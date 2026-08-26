@@ -3,12 +3,16 @@ talks to TEFAS, and it does so in the background."""
 
 import calendar
 import os
-from datetime import date, timedelta
+import threading
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Annotated, Literal, Optional
 
 import psycopg
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -16,7 +20,22 @@ from pytefas import TefasAPIError, TefasInvalidParameterError, TefasRateLimitErr
 
 from . import auth, holdings, kap, kiid, store
 
-app = FastAPI(title="Fonlu API")
+# Piyasa ve KAP saatleri Turkiye'ye gore; konteyner UTC'de kosuyor.
+TZ = ZoneInfo("Europe/Istanbul")
+SYNC_HOUR = 10          # tam senkron saati (10:05)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    threading.Thread(target=_scheduler, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Fonlu API", lifespan=lifespan)
+
+# Tarama yaniti sikistirilmadan ~1.2 MB; gzip'le ~10'da birine iniyor. Telefon
+# baglantisinda listenin gec gelmesinin en buyuk sebebi buydu.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Env eksikse ilk istekte KeyError -> govdesi JSON olmayan 500 doner ve
 # frontend "is not valid JSON" der. Baslangicta patlasin, sebep loglarda gorunsun.
@@ -27,6 +46,46 @@ for _var in ("DATABASE_URL", "SUPABASE_URL"):
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
 refresh_state = {"running": False, "log": [], "error": None}
+
+
+def _run_sync(days=None, kap_only=False):
+    """Hem /api/refresh'in hem zamanlayicinin kullandigi tek senkron yolu."""
+    if refresh_state["running"]:
+        return
+    refresh_state.update(running=True, log=[], error=None)
+    log = refresh_state["log"].append
+    try:
+        if kap_only:
+            with store.get_pool().connection() as conn:
+                kap.sync(conn, days=1, log=log)
+        else:
+            store.sync(days=days, log=log)
+    except Exception as exc:  # surfaced through /api/status
+        refresh_state["error"] = str(exc)
+    finally:
+        refresh_state["running"] = False
+
+
+def _next_wake(now: datetime) -> datetime:
+    """Bir sonraki saat basi + 5 dakika."""
+    nxt = now.replace(minute=5, second=0, microsecond=0)
+    return nxt if nxt > now else nxt + timedelta(hours=1)
+
+
+def _scheduler():
+    """Her saatin 5'inde uyanir: 10:05'te tam senkron, diger saatlerde yalniz KAP.
+
+    KAP'in push/websocket ucu yok, "dinleyici" ancak yoklama olabiliyor; saatlik
+    KAP adimi bildirim kutusunu gun icinde guncel tutan sey.
+    ponytail: surec ici zamanlayici, tek uvicorn iscisi varsayiyor. `--workers`
+    verilirse her isci ayri tetikler; o noktada isi konteyner disina, cron'a tasi.
+    """
+    while True:
+        now = datetime.now(TZ)
+        nxt = _next_wake(now)
+        # sleep yerine Event().wait: sinyal aldiginda beklemeyi bolmesi icin.
+        threading.Event().wait((nxt - now).total_seconds())
+        _run_sync(kap_only=nxt.hour != SYNC_HOUR)
 
 # Onbellek bir donemin baslangicina tam yetismedginde bu kadar gunluk sapma
 # donemi gecersiz saymaz (hafta sonu / tatil).
@@ -79,15 +138,14 @@ def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
 
 @app.get("/api/status")
 def status(conn: Db, user: User):
-    n = conn.execute("SELECT COUNT(*) c FROM prices").fetchone()["c"]
-    funds = conn.execute("SELECT COUNT(DISTINCT fund_code) c FROM prices").fetchone()["c"]
-    return {
-        "rows": n,
-        "funds": funds,
-        "kap": conn.execute("SELECT COUNT(*) c FROM kap_disclosures").fetchone()["c"],
-        "last_date": store.last_cached_date(conn),
-        "refresh": refresh_state,
-    }
+    # Dort ayri sorgu dort gidis-donus demekti; sayimlar tek turda gelsin.
+    row = conn.execute(
+        """SELECT (SELECT COUNT(*) FROM prices) AS rows,
+                  (SELECT COUNT(DISTINCT fund_code) FROM prices) AS funds,
+                  (SELECT COUNT(*) FROM kap_disclosures) AS kap,
+                  (SELECT MAX(date) FROM prices) AS last_date"""
+    ).fetchone()
+    return {**row, "refresh": refresh_state}
 
 
 @app.post("/api/refresh")
@@ -95,49 +153,32 @@ def refresh(tasks: BackgroundTasks, user: User,
             days: Optional[int] = Query(None, ge=1, le=730)):
     if refresh_state["running"]:
         raise HTTPException(409, "Guncelleme zaten calisiyor.")
-
-    def job():
-        refresh_state.update(running=True, log=[], error=None)
-        try:
-            # ponytail: kendi baglantisini havuzdan alsin; istek kapsamindaki
-            # baglanti bu noktada havuza geri verilmis oluyor.
-            store.sync(days=days, log=refresh_state["log"].append)
-        except Exception as exc:  # surfaced through /api/status
-            refresh_state["error"] = str(exc)
-        finally:
-            refresh_state["running"] = False
-
-    tasks.add_task(job)
+    # ponytail: kendi baglantisini havuzdan alsin; istek kapsamindaki baglanti
+    # bu noktada havuza geri verilmis oluyor.
+    tasks.add_task(_run_sync, days)
     return {"status": "started"}
 
 
-@app.get("/api/funds")
-def list_funds(
-    conn: Db,
-    user: User,
-    kind: Optional[Literal["YAT", "EMK", "BYF", "GYF", "GSYF"]] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    q: Optional[str] = None,
-    codes: Optional[str] = Query(None, description="Virgulle ayrilmis fon kodlari"),
-    category: Optional[str] = None,
-    min_return: Optional[float] = None,
-    max_return: Optional[float] = None,
-    min_size: Optional[float] = None,
-    limit: int = Query(3000, ge=1, le=5000),
-):
-    """Funds with their return over [start, end], best return first."""
-    start, end = _range(start, end)
-    # `codes` takip listesi gibi sabit bir kume icin: diger filtreler uygulanmaz,
-    # yoksa kaydedilen fon tarama filtresine takilip listeden dusuyor.
-    wanted = [c.strip().upper() for c in codes.split(",") if c.strip()] if codes else None
-    if wanted is not None and not wanted:
-        return {"start": start, "end": end, "count": 0,
-                "categories": CATEGORIES + ["Karma"], "funds": []}
-    if wanted:
-        # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
-        # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
-        kind = q = None
+# ponytail: surec ici onbellek, dolu olunca komple bosalir -- LRU degil, ama
+# anahtar zaten avuc dolusu (donem x tur x arama). lru_cache kullanilamadi:
+# `conn` anahtara girer, her istek yeni baglantiyla gelince onbellek ise yaramazdi.
+# Girdi basina ~5 MB; dar bellekte _SCAN_MAX'i dusur.
+_SCAN_MAX = 8
+_scan_cache: dict = {}
+
+
+def _scan(conn, stamp: date, start: str, end: str, kind: Optional[str], q: Optional[str],
+          wanted: Optional[tuple[str, ...]]):
+    """Tarama sorgusunun ham satirlari + donem oncesi ankor fiyatlari.
+
+    Fiyatlar gunde bir kez /api/refresh ile degisiyor; anahtardaki `stamp`
+    (onbellegin son fiyat gunu) degisince girdiler kendiliginden gecersiz kalir.
+    Doner degerler okunur kabul edilir: cagiran her fon icin yeni sozluk kuruyor.
+    """
+    key = (stamp, start, end, kind, q, wanted)
+    if key in _scan_cache:
+        return _scan_cache[key]
+
     code_filter = (" AND fund_code IN (%s)" % ",".join(["%s"] * len(wanted))) if wanted else ""
     rows = conn.execute(
         """
@@ -181,6 +222,42 @@ def list_funds(
                     ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
              FROM prices WHERE date BETWEEN %s::date - 15 AND %s) t
            WHERE rn = 1""", (start, start))}
+
+    if len(_scan_cache) >= _SCAN_MAX:
+        _scan_cache.clear()
+    _scan_cache[key] = (rows, base)
+    return rows, base
+
+
+@app.get("/api/funds")
+def list_funds(
+    conn: Db,
+    user: User,
+    kind: Optional[Literal["YAT", "EMK", "BYF", "GYF", "GSYF"]] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    q: Optional[str] = None,
+    codes: Optional[str] = Query(None, description="Virgulle ayrilmis fon kodlari"),
+    category: Optional[str] = None,
+    min_return: Optional[float] = None,
+    max_return: Optional[float] = None,
+    min_size: Optional[float] = None,
+    limit: int = Query(3000, ge=1, le=5000),
+):
+    """Funds with their return over [start, end], best return first."""
+    start, end = _range(start, end)
+    # `codes` takip listesi gibi sabit bir kume icin: diger filtreler uygulanmaz,
+    # yoksa kaydedilen fon tarama filtresine takilip listeden dusuyor.
+    wanted = [c.strip().upper() for c in codes.split(",") if c.strip()] if codes else None
+    if wanted is not None and not wanted:
+        return {"start": start, "end": end, "count": 0,
+                "categories": CATEGORIES + ["Karma"], "funds": []}
+    if wanted:
+        # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
+        # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
+        kind = q = None
+    rows, base = _scan(conn, store.last_cached_date(conn), start, end, kind, q,
+                       tuple(wanted) if wanted else None)
 
     out = []
     for r in rows:
@@ -350,6 +427,8 @@ def fund_detail(code: str, conn: Db, user: User,
         "fund_code": code,
         **dict(meta),
         "return_pct": _pct(series[0]["price"], series[-1]["price"]),
+        # Son iki islem gunu arasi degisim; tek gunluk gecmiste onceki gun yok.
+        "daily_pct": _pct(hist[-2]["price"], last) if len(hist) > 1 else None,
         "series": [dict(r) for r in series],
         "allocation": alloc,
         "allocation_date": bd["date"] if bd else None,
@@ -579,6 +658,24 @@ def get_watchlist(conn: Db, user: User):
     return {"codes": [r["fund_code"] for r in rows]}
 
 
+@app.get("/api/notifications")
+def notifications(conn: Db, user: User, limit: int = Query(50, ge=1, le=200)):
+    """Takip listesindeki ve portfoydeki fonlarin son KAP bildirimleri.
+
+    Okundu bilgisi sunucuda tutulmuyor: tarayicidaki son gorulen bildirim
+    numarasi yetiyor, kullanici basina yeni bir tablo acmaya degmez.
+    """
+    rows = conn.execute(
+        """SELECT * FROM kap_disclosures
+           WHERE fund_code IN (SELECT fund_code FROM watchlist WHERE user_id = %s
+                               UNION SELECT fund_code FROM positions WHERE user_id = %s)
+           ORDER BY publish_date DESC LIMIT %s""",
+        (user, user, limit),
+    ).fetchall()
+    return {"disclosures": [{**dict(r), "url": kap.DISCLOSURE_URL.format(r["disclosure_index"])}
+                            for r in rows]}
+
+
 @app.put("/api/watchlist/{code}", status_code=204)
 def add_watch(code: str, conn: Db, user: User):
     code = code.upper()
@@ -677,12 +774,13 @@ def list_positions(conn: Db, user: User):
         """
         SELECT p.*, l.price AS last_price, l.date AS last_date, l.fund_name
         FROM positions p
-        LEFT JOIN (
-            SELECT fund_code, fund_name, price, date FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
-                FROM prices
-            ) r WHERE rn = 1
-        ) l ON l.fund_code = p.fund_code
+        -- LATERAL sart: ROW_NUMBER'li hali her portfoy acilisinda tum prices
+        -- tablosunu (600k+ satir) tariyordu; boyle her pozisyon icin PK'dan
+        -- tek satir okunuyor (1.0 sn -> 0.06 sn).
+        LEFT JOIN LATERAL (
+            SELECT fund_name, price, date FROM prices
+            WHERE fund_code = p.fund_code ORDER BY date DESC LIMIT 1
+        ) l ON true
         WHERE p.user_id = %s
         ORDER BY p.fund_code, p.buy_date
         """,

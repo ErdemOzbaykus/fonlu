@@ -47,6 +47,9 @@ button, input, select { font:inherit; color:inherit; }
 #rail nav button i { font-style:normal; font:11px var(--mono); color:var(--faint); width:16px; }
 #rail nav button.active i { color:var(--accent); }
 .more-btn { display:none; }
+/* Bildirim sayaci: gezinme dugmesinin sagina yapisik kucuk rozet. */
+#rail nav button em { font-style:normal; margin-left:auto; font:10px var(--mono);
+  background:var(--accent); color:var(--ink); border-radius:9px; padding:1px 6px; }
 .rail-foot { margin-top:auto; padding:16px 20px 0; border-top:1px solid var(--line); }
 .rail-foot p { margin:0 0 10px; font:11px/1.5 var(--mono); color:var(--faint); }
 .rail-foot b { color:var(--dim); font-weight:400; }
@@ -139,6 +142,15 @@ tbody tr:hover .kod { border-color:var(--accent); color:var(--accent); }
 #s-more { display:block; margin:14px auto 24px; }
 #s-more[hidden] { display:none; }
 .empty { padding:40px 20px; text-align:center; color:var(--faint); }
+
+/* ---------- yukleniyor perdesi ---------- */
+#loading { position:fixed; inset:0; z-index:70; display:flex; gap:14px;
+  flex-direction:column; align-items:center; justify-content:center;
+  background:#12161fd9; color:var(--dim); font:12px var(--mono); letter-spacing:.08em; }
+#loading[hidden] { display:none; }
+#loading .spin { width:30px; height:30px; border:2px solid var(--line);
+  border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 /* maintainAspectRatio:false means the container owns the height. */
 .chartbox { position:relative; height:340px; }
 #d-overview .chartbox { height:260px; }
@@ -152,8 +164,18 @@ details.addpos > summary span { margin-left:7px; }
 details.addpos > summary:hover, details.addpos[open] > summary { color:var(--paper); }
 details.addpos[open] > summary { border-bottom:1px solid var(--line); }
 details.addpos form { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; padding:14px 15px; }
+/* Fon zaten portfoydeyse: formun ustunde tek satirlik ozet. */
+.pos-sum { display:flex; flex-wrap:wrap; gap:6px 18px; padding:11px 15px;
+  border-bottom:1px solid var(--line); font:12px var(--mono); }
+.pos-sum[hidden] { display:none; }
+.pos-sum span { color:var(--faint); }
+.pos-sum b { font-weight:400; color:var(--paper); margin-left:6px; font-variant-numeric:tabular-nums; }
 /* KPI'nin yaninda duran ikincil deger: sinif payinin yaninda siralama gibi. */
 .kpis b i { font-style:normal; font:11px var(--mono); color:var(--faint); margin-left:7px; }
+/* Fiyat 21px mono; gunluk degisim yaninda kutuya sigmayip kirpiliyordu. */
+#d-price i { display:block; margin:3px 0 0; font-size:12px; }
+.kpis b i.up { color:var(--gain); }
+.kpis b i.down { color:var(--loss); }
 .eyebrow { font:10px var(--mono); letter-spacing:.09em; text-transform:uppercase; color:var(--faint); }
 /* Kunye satiri 6 kutu: auto-fit 4 sutun secince altta bos hucre kaliyordu.
    6 hem 3'e hem 2'ye tam bolunuyor, satir sonu her genislikte dolu. */
@@ -263,6 +285,11 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   }
   #rail nav button.active { border-left-color:transparent; border-top-color:var(--accent); }
   #rail nav button i { display:none; }
+  /* Alt cubukta dugme ~34px: rozetin sayisi etikete biniyor. Kosede sade bir
+     nokta yeter, sayiyi zaten sekmeye girince goruyor. */
+  #rail nav button { position:relative; }
+  #rail nav button em { position:absolute; top:4px; right:12px; margin:0; padding:0;
+    width:6px; height:6px; border-radius:50%; font-size:0; overflow:hidden; }
   #rail nav button b { display:block; font:500 10px var(--sans); letter-spacing:-.01em;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
   /* Durum + guncelle + cikis: cubuktaki ⋯ ile acilan kucuk sayfa. Checkbox
@@ -409,6 +436,8 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
 </head>
 <body>
 
+<div id="loading" hidden><div class="spin"></div><p>YÜKLENİYOR</p></div>
+
 <div id="auth-gate" hidden>
   <form id="auth-form" class="card">
     <h2>Fonlu</h2>
@@ -429,6 +458,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
     <button data-view="saved"><i>02</i><b>Kaydettiklerim</b></button>
     <button data-view="compare"><i>03</i><b>Karşılaştır</b></button>
     <button data-view="portfolio"><i>04</i><b>Portföy</b></button>
+    <button data-view="notify"><i>05</i><b>Bildirimler</b><em id="n-badge" hidden></em></button>
   </nav>
   <input type="checkbox" id="more-t" hidden>
   <label class="more-btn" for="more-t" title="Daha fazla">⋯</label>
@@ -549,6 +579,20 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
       <div class="empty" id="p-empty" hidden>Henüz pozisyon yok. Yukarıdaki formdan ekleyin.</div>
     </div>
   </section>
+
+  <!-- ============ BİLDİRİMLER ============ -->
+  <section id="notify" class="view">
+    <div class="topbar">
+      <div class="fields">
+        <span class="eyebrow">Takip ettiğin ve portföyündeki fonların KAP bildirimleri</span>
+        <button class="btn ghost" id="n-seen" style="margin-left:auto">Okundu işaretle</button>
+      </div>
+    </div>
+    <div class="body pad">
+      <div id="n-list"></div>
+      <div class="empty" id="n-empty" hidden></div>
+    </div>
+  </section>
 </main>
 </div>
 
@@ -572,6 +616,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
     <div class="pane on" id="d-overview">
       <details class="addpos" id="d-addpos">
         <summary><span>Portföye ekle</span></summary>
+        <div class="pos-sum" id="d-possum" hidden></div>
         <form id="d-posform">
           <label class="f"><span>Adet</span>
             <input type="number" id="d-punits" step="any" min="0.000001" required style="width:130px"></label>
@@ -582,7 +627,8 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
           <span id="d-pmsg" style="font-size:13px"></span>
         </form>
       </details>
-      <div class="kpis" style="margin-bottom:16px"><div><small>Son fiyat</small><b id="d-price"></b></div>
+      <div class="kpis" style="margin-bottom:16px">
+        <div><small>Son fiyat · günlük</small><b id="d-price"></b></div>
         <div><small>Dönem getirisi</small><b id="d-ret"></b></div>
         <div><small>Volatilite (yıllık)</small><b id="d-vol"></b></div>
         <div><small>Max düşüş</small><b id="d-mdd"></b></div></div>

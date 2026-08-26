@@ -87,8 +87,10 @@ def sync(conn, days=90, log=print):
     while cur <= end:
         chunk_end = min(cur + timedelta(days=CHUNK_DAYS - 1), end)
         rows = fetch_complete(cur, chunk_end)
-        with conn.cursor() as cur:
-            cur.executemany(
+        # `cur` tarih imleci; DB imlecine ayri ad -- ayni ada yazilinca log satiri
+        # tarih yerine Cursor nesnesini basiyordu.
+        with conn.cursor() as db:
+            db.executemany(
                 "INSERT INTO kap_disclosures (disclosure_index, fund_code, publish_date,"
                 " title, subject, summary, disclosure_class, attachment_count)"
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)"
