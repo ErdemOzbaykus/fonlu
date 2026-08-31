@@ -3,6 +3,7 @@ talks to TEFAS, and it does so in the background."""
 
 import calendar
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -239,6 +240,8 @@ def list_funds(
     q: Optional[str] = None,
     codes: Optional[str] = Query(None, description="Virgulle ayrilmis fon kodlari"),
     category: Optional[str] = None,
+    unvan: Optional[str] = None,
+    fon_turu: Optional[str] = None,
     min_return: Optional[float] = None,
     max_return: Optional[float] = None,
     min_size: Optional[float] = None,
@@ -251,7 +254,8 @@ def list_funds(
     wanted = [c.strip().upper() for c in codes.split(",") if c.strip()] if codes else None
     if wanted is not None and not wanted:
         return {"start": start, "end": end, "count": 0,
-                "categories": CATEGORIES + ["Karma"], "funds": []}
+                "categories": CATEGORIES + ["Karma"], "unvanlar": UNVANLAR,
+                "turler": TURLER, "funds": []}
     if wanted:
         # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
         # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
@@ -269,6 +273,7 @@ def list_funds(
         # allocation jsonb: psycopg zaten dict olarak veriyor, json.loads gerekmiyor.
         groups = _groups(r["allocation"] or {})
         cat = _category(groups)
+        unv = _unvan(r["fund_name"])
         if not wanted:  # sabit kume istendiginde tarama filtreleri uygulanmaz
             if min_return is not None and (ret is None or ret < min_return):
                 continue
@@ -278,14 +283,19 @@ def list_funds(
                 continue
             if category and cat != category:
                 continue
+            if unvan and unvan not in unv:
+                continue
+            if fon_turu and fon_turu not in (FON_TURU.get(t) for t in unv):
+                continue
         fund = {k: r[k] for k in r.keys() if k != "allocation"}
         out.append({**fund, "first_price": first_price, "first_date": first_date,
-                    "return_pct": ret, "category": cat, "groups": groups,
+                    "return_pct": ret, "category": cat, "unvan": ", ".join(unv), "groups": groups,
                     # Aralikta tek fiyat varsa onceki gun yok; None kalir, arayuz "—" basar.
                     "daily_pct": _pct(r["prev_price"], r["last_price"])})
     out.sort(key=lambda f: (f["return_pct"] is None, -(f["return_pct"] or 0)))
     return {"start": start, "end": end, "count": len(out),
-            "categories": CATEGORIES + ["Karma"], "funds": out[:limit]}
+            "categories": CATEGORIES + ["Karma"], "unvanlar": UNVANLAR,
+            "turler": TURLER, "funds": out[:limit]}
 
 
 def _pct(first, last):
@@ -335,6 +345,45 @@ CATEGORY_RULES = [
                     "foreign_etf_pct")),
 ]
 CATEGORIES = [name for name, _ in CATEGORY_RULES]
+
+
+# Fon unvan turu: TEFAS'in "Fon Unvan Turu" filtresindeki degerler. Bunlar
+# semsiye fon turu degil, unvanda gecen etiketler -- bir fon birden fazlasina
+# girebiliyor ("... KATILIM HISSE SENEDI ..."), o yuzden liste donuyor.
+# pytefas ayri bir sutun vermedigi icin unvandan okunuyor; SPK bu ibareleri
+# unvanda zorunlu tuttugundan tahmin degil, resmi etiket.
+UNVAN_RULES = [
+    ("Altın", r"ALTIN"),
+    ("Borçlanma Araçları", r"BORÇLANMA ARAÇ"),
+    ("Döviz", r"DÖVİZ"),
+    ("Endeks", r"ENDEKS"),
+    ("Endeks Hisse Senedi", r"ENDEKSİ? HİSSE SENEDİ"),
+    ("Gümüş", r"GÜMÜŞ"),
+    ("Hisse Senedi", r"HİSSE SENEDİ"),
+    ("Hisse Senedi Yoğun", r"HİSSE SENEDİ YOĞUN"),
+    ("Katılım", r"KATILIM"),
+    ("Sürdürülebilirlik Fonları", r"SÜRDÜRÜLEB[İI]L"),
+    ("Yabancı", r"YABANCI"),
+]
+UNVANLAR = [name for name, _ in UNVAN_RULES]
+
+
+# TEFAS'in "Fon Turu" filtresi: unvan turlerinin bir alt kumesi, sadece
+# ekli/eksik "Fonu" ibaresiyle yaziliyor. Ayri regex listesi tutulmuyor,
+# ikisi ayrisirsa iki yerde duzeltme gerekirdi.
+FON_TURU = {"Altın": "Altın Fonu", "Endeks": "Endeks Fon", "Gümüş": "Gümüş Fonu",
+            "Hisse Senedi": "Hisse Senedi Fonu", "Hisse Senedi Yoğun": "Hisse Senedi Yoğun",
+            "Yabancı": "Yabancı Fon"}
+TURLER = list(FON_TURU.values())
+
+
+def _unvan(fund_name: Optional[str]) -> list:
+    """Unvanda gecen tum etiketler. Parantezler KORUNUYOR: "(HISSE SENEDI
+    YOGUN FON)" TEFAS'ta bir unvan turu, atilirsa etiket kaybolur."""
+    if not fund_name:
+        return []
+    name = fund_name.upper()
+    return [lab for lab, pat in UNVAN_RULES if re.search(pat, name)]
 
 
 def _groups(allocation: dict) -> dict:
@@ -434,6 +483,7 @@ def fund_detail(code: str, conn: Db, user: User,
         "allocation_date": bd["date"] if bd else None,
         "groups": _groups(alloc),
         "category": _category(_groups(alloc)),
+        "unvan": ", ".join(_unvan(meta["fund_name"])),
         "periods": periods,
         "peer": _peer(conn, meta, alloc),
         **_risk(prices),

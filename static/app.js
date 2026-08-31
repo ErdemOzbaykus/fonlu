@@ -278,7 +278,8 @@ function fundRow(f) {
       aria-pressed="${watched.has(f.fund_code)}">${watched.has(f.fund_code) ? "★" : "☆"}</button></td>
     <td class="l"><span class="kod">${f.fund_code}</span></td>
     <td class="l name" title="${esc(f.fund_name)}">${esc(f.fund_name)}</td>
-    <td class="l faint" style="font-size:12px;white-space:nowrap">${f.category || "—"}</td>
+    <td class="l faint" style="font-size:12px;white-space:nowrap"
+      title="${esc(f.unvan || "")}">${esc(f.unvan) || "—"}</td>
     <td class="l">${allocBar(f.groups)}</td>
     <td class="num">${num(f.last_price, 6)}</td>
     ${cell(f.daily_pct)}
@@ -309,22 +310,36 @@ function renderFunds() {
 
 $("s-more").onclick = () => { shown += PAGE * 4; renderFunds(); };
 
-async function loadFunds() {
-  $("filt-t").checked = false;  // telefondaki filtre sayfasi acik kaldiysa kapansin
-  const p = new URLSearchParams({ start: $("s-start").value, end: $("s-end").value });
-  for (const [key, el] of [["kind", "s-kind"], ["category", "s-cat"],
-                           ["min_return", "s-min"], ["min_size", "s-size"], ["q", "s-q"]]) {
-    if ($(el).value) p.set(key, $(el).value);
+const FILTERS = [["kind", "s-kind"], ["fon_turu", "s-turu"], ["unvan", "s-unvan"],
+                 ["category", "s-cat"],
+                 ["min_return", "s-min"], ["min_size", "s-size"]];
+// Arama her tusta kendiliginden kosuyor; diger filtreler "Filtrele"ye basilana
+// kadar uygulanmiyor, yoksa yarim birakilmis bir filtre aramayla birlikte
+// istemeden devreye girerdi. `applied` en son onaylanan filtre kumesi.
+let applied = {};
+
+async function loadFunds({ onlyQuery = false } = {}) {
+  if (!onlyQuery) {
+    $("filt-t").checked = false;  // telefondaki filtre sayfasi acik kaldiysa kapansin
+    applied = Object.fromEntries(
+      FILTERS.filter(([, el]) => $(el).value).map(([key, el]) => [key, $(el).value]));
   }
+  const p = new URLSearchParams({ start: $("s-start").value, end: $("s-end").value, ...applied });
+  if ($("s-q").value) p.set("q", $("s-q").value);
   $("s-empty").hidden = false;
   $("s-empty").textContent = "Yükleniyor…";
   try {
     const d = await busy(api("/funds?" + p));
     funds = d.funds;
     shown = PAGE;  // yeni filtre, sayfalama başa dönsün
-    if ($("s-cat").options.length === 1) {
-      $("s-cat").insertAdjacentHTML("beforeend",
-        d.categories.map((c) => `<option>${c}</option>`).join(""));
+    // Eski bir surum bu listeleri gondermiyorsa secenekler bos kalir; tablonun
+    // tamami hata verecegine o filtre calismasin.
+    for (const [id, list] of [["s-cat", d.categories], ["s-unvan", d.unvanlar],
+                              ["s-turu", d.turler]]) {
+      if ($(id).options.length === 1 && list) {
+        $(id).insertAdjacentHTML("beforeend",
+          list.map((c) => `<option>${esc(c)}</option>`).join(""));
+      }
     }
     renderFunds();
     $("s-empty").textContent = "Bu filtrelere uyan fon yok.";
@@ -333,8 +348,19 @@ async function loadFunds() {
     $("s-empty").innerHTML = `<span class="down">${esc(e.message)}</span>`;
   }
 }
-$("s-go").onclick = loadFunds;
-$("s-q").onkeydown = (e) => { if (e.key === "Enter") loadFunds(); };
+$("s-go").onclick = () => loadFunds();
+
+// Yazarken ara: her tusa istek atmamak icin 300 ms bekleyip son halini gonderir.
+let qTimer;
+$("s-q").oninput = () => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => loadFunds({ onlyQuery: true }), 300);
+};
+$("s-q").onkeydown = (e) => {
+  if (e.key !== "Enter") return;
+  clearTimeout(qTimer);
+  loadFunds({ onlyQuery: true });
+};
 
 // ---------------- watchlist ----------------
 let watched = new Set();
@@ -438,7 +464,7 @@ async function openDrawer(code) {
   } catch (e) { $("d-name").innerHTML = `<span class="down">${esc(e.message)}</span>`; return; }
 
   $("d-name").textContent = d.fund_name;
-  $("d-cat").textContent = [d.kind, d.category].filter(Boolean).join(" · ");
+  $("d-cat").textContent = [d.kind, d.unvan, d.category].filter(Boolean).join(" · ");
   // Gunluk degisim fiyatin yanina: 5. kutu izgarada bos hucre birakiyordu,
   // "Sinifindaki payi"nda zaten kullanilan ikincil deger kalibi burada da isliyor.
   $("d-price").innerHTML = `${num2(d.price)}<i class="${cls(d.daily_pct)}">${pct(d.daily_pct)}</i>`;

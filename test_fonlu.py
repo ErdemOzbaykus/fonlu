@@ -523,4 +523,22 @@ assert parse("HİSSE SENETLERİ\nAAAA TL X 1,00 2,00 3,00 4,00 900,00 6,00\n") =
 # Eski sqlite holdings semasinin migration testi kalkti: store._migrate() ile
 # birlikte sqlite katmani tamamen gitti, test edecek bir sey kalmadi.
 
+# ---- fon unvan turu ----
+_u = main._unvan
+# TEFAS'ta bir fon birden fazla unvan turune girebiliyor
+assert _u("KUVEYT TÜRK PORTFÖY KATILIM HİSSE SENEDİ SERBEST FON (HİSSE SENEDİ YOĞUN FON)") == \
+    ["Hisse Senedi", "Hisse Senedi Yoğun", "Katılım"]
+# parantezli "HISSE SENEDI YOGUN FON" eki de bir unvan turu, atilmamali
+assert "Hisse Senedi Yoğun" in _u("PARDUS PORTFÖY BİRİNCİ HİSSE SENEDİ (TL) FONU (HİSSE SENEDİ YOĞUN FON)")
+assert _u("YAPI KREDİ PORTFÖY ÜSKÜDAR KAR PAYI ÖDEYEN SERBEST (DÖVİZ) FON") == ["Döviz"]
+assert _u("A1 CAPİTAL PORTFÖY ALTIN FONU") == ["Altın"]
+assert _u("QNB PORTFÖY AMERİKAN DOLARI YABANCI BORSA YATIRIM FONU") == ["Yabancı"]
+assert "Endeks Hisse Senedi" in _u(
+    "YAPI KREDİ PORTFÖY BIST TEKNOLOJİ AĞIRLIK SINIRLAMALI ENDEKSİ HİSSE SENEDİ FONU")
+# unvaninda hicbir etiket gecmeyen fon (ornegin duz serbest fon) bos liste doner
+assert _u("MT PORTFÖY İKİNCİ SERBEST FON") == []
+assert _u(None) == []
+# fon turu = unvan turlerinin "...Fonu" ekli alt kumesi, ayri kural listesi yok
+assert set(main.TURLER) <= {main.FON_TURU[t] for t in main.UNVANLAR if t in main.FON_TURU}
+
 print("ok")
