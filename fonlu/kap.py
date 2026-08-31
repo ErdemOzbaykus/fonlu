@@ -31,6 +31,7 @@ HEADERS = {
 # is walked in windows. Disclosure volume spikes at month end (portfolio and
 # financial reports), so a window that hits the cap is halved and retried.
 CHUNK_DAYS = 7
+BACKOFF = 30        # 429 sonrasi ilk bekleme; 30/60/120 sn
 ROW_CAP = 2000
 
 
@@ -38,23 +39,34 @@ class KapError(RuntimeError):
     pass
 
 
-def fetch(start: date, end: date, timeout=30) -> list[dict]:
-    try:
-        r = requests.post(
-            API,
-            json={"fromDate": start.isoformat(), "toDate": end.isoformat()},
-            headers=HEADERS,
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        rows = r.json()
-    except requests.RequestException as e:
-        raise KapError(f"KAP'a ulasilamadi: {e}") from e
-    except ValueError as e:
-        raise KapError(f"KAP gecersiz yanit dondu: {e}") from e
-    if not isinstance(rows, list):
-        raise KapError(f"KAP beklenmeyen yanit: {str(rows)[:200]}")
-    return rows
+def fetch(start: date, end: date, timeout=30, deneme=4) -> list[dict]:
+    """Bir tarih araligindaki tum fon bildirimleri.
+
+    KAP'in hiz limiti belgeli degil ve surekli kullanimda 429 donuyor: dort
+    yillik backfill 64. pencerede carpti. Ustel bekleyip tekrar deniyoruz,
+    son denemede hata yukari cikiyor.
+    """
+    for i in range(deneme):
+        try:
+            r = requests.post(
+                API,
+                json={"fromDate": start.isoformat(), "toDate": end.isoformat()},
+                headers=HEADERS,
+                timeout=timeout,
+            )
+            r.raise_for_status()
+        except requests.RequestException as e:
+            if i == deneme - 1:
+                raise KapError(f"KAP'a ulasilamadi: {e}") from e
+            time.sleep(BACKOFF * 2**i)
+            continue
+        try:
+            rows = r.json()
+        except ValueError as e:
+            raise KapError(f"KAP gecersiz yanit dondu: {e}") from e
+        if not isinstance(rows, list):
+            raise KapError(f"KAP beklenmeyen yanit: {str(rows)[:200]}")
+        return rows
 
 
 def fetch_complete(start: date, end: date) -> list[dict]:
