@@ -745,23 +745,32 @@ $("d-kaplist").onclick = async (e) => {
 // KAP'in push/websocket ucu yok: sunucu her saatin 5'inde KAP'i yokluyor, burasi
 // da o onbellegi okuyor. Okundu isareti cihazda -- gorulen en buyuk bildirim
 // numarasi yetiyor, sunucuda kullanici basina tablo acmaya degmez.
-const seen = {
-  get: () => +localStorage.getItem("fonlu-seen") || 0,
-  set: (n) => localStorage.setItem("fonlu-seen", n),
-};
+// Temizleme de ayni sekilde cihazda: kap_disclosures onbellegi tum kullanicilar
+// icin ortak, sunucudan silmek baskasinin bildirimini de gotururdu.
+const localMark = (key) => ({
+  get: () => +localStorage.getItem(key) || 0,
+  set: (n) => localStorage.setItem(key, n),
+});
+const seen = localMark("fonlu-seen");
+const cleared = localMark("fonlu-cleared");
 let notices = [];
 
+const lastIndex = () => Math.max(...notices.map((x) => x.disclosure_index));
+
 function renderNotifications() {
-  const mark = seen.get();
-  $("n-list").innerHTML = notices.map((x) => `<div class="discl">
+  const readMark = seen.get();
+  const shownNotices = notices.filter((x) => x.disclosure_index > cleared.get());
+  $("n-list").innerHTML = shownNotices.map((x) => `<div class="discl">
     <a href="${x.url}" target="_blank" rel="noopener noreferrer">${esc(x.subject || "Bildirim")}</a>
-    ${x.disclosure_index > mark ? '<span class="tag">yeni</span>' : ""}
+    ${x.disclosure_index > readMark ? '<span class="tag">yeni</span>' : ""}
     <p><span class="kod">${x.fund_code}</span> · ${x.publish_date.slice(0, 16)}${
       x.summary ? " · " + esc(x.summary.trim().slice(0, 140)) : ""}</p>
   </div>`).join("");
-  $("n-empty").hidden = notices.length > 0;
-  $("n-empty").textContent = "Takip ettiğin ya da portföyündeki fonlar için bildirim yok.";
-  const fresh = notices.filter((x) => x.disclosure_index > mark).length;
+  $("n-empty").hidden = shownNotices.length > 0;
+  $("n-empty").textContent = notices.length
+    ? "Bildirimler temizlendi; yenisi geldiğinde burada görünür."
+    : "Takip ettiğin ya da portföyündeki fonlar için bildirim yok.";
+  const fresh = shownNotices.filter((x) => x.disclosure_index > readMark).length;
   $("n-badge").hidden = !fresh;
   $("n-badge").textContent = fresh > 99 ? "99+" : fresh;
 }
@@ -778,7 +787,15 @@ async function loadNotifications() {
 }
 
 $("n-seen").onclick = () => {
-  if (notices.length) seen.set(Math.max(...notices.map((x) => x.disclosure_index)));
+  if (notices.length) seen.set(lastIndex());
+  renderNotifications();
+};
+
+$("n-clear").onclick = () => {
+  if (!notices.length) return;
+  // Temizlemek okumak demek: aksi halde liste bosalir ama rozet yanik kalir.
+  cleared.set(lastIndex());
+  seen.set(lastIndex());
   renderNotifications();
 };
 
