@@ -39,6 +39,11 @@ def current_user(cred: HTTPAuthorizationCredentials | None = Depends(_bearer)) -
             algorithms=["ES256"],
             audience="authenticated",
             issuer=_issuer(),
+            # Konteynerin saati Supabase'inkinden birkac saniye geri kalinca
+            # taze token "The token is not yet valid (iat)" ile reddediliyordu.
+            # 60 sn tolerans normal saat kaymasini yutuyor; gercek suresi
+            # dolmus token hala reddediliyor.
+            leeway=60,
         )
     except jwt.PyJWTError as exc:
         raise HTTPException(401, f"Oturum gecersiz: {exc}")
