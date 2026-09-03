@@ -53,6 +53,23 @@ async function passkeyRegister() {
   if (error) throw error;
 }
 
+// Davetle gelen hesabin sifresi yok; passkey kaydetmeden cikis yaparsa
+// kilitlenip yeni davet bekliyordu. GoTrue'nun /user ucu oturum acikken
+// sifre belirlemeye izin veriyor.
+async function updatePassword(password) {
+  const r = await fetch(AUTH + "/user", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${session.get().access_token}`,
+    },
+    body: JSON.stringify({ password }),
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error_description || d.msg || d.message || "Şifre güncellenemedi");
+}
+
 // Access token 1 saatte doluyor; refresh token'la sessizce yenile.
 async function refresh() {
   const s = session.get();
@@ -1058,6 +1075,19 @@ $("add-passkey").addEventListener("click", async () => {
   try {
     await passkeyRegister();
     alert("Passkey eklendi.");
+  } catch (err) { alert(err.message); }
+});
+
+// ponytail: prompt() sifreyi ekranda acikta gosteriyor. Kendi cihazinda tek
+// seferlik bir islem icin yeterli; rahatsiz ederse auth-gate'teki gibi bir
+// <input type="password"> formuna cevrilir.
+$("set-pass").addEventListener("click", async () => {
+  const pass = prompt("Yeni şifre (en az 6 karakter):");
+  if (!pass) return;
+  if (pass.length < 6) return alert("Şifre en az 6 karakter olmalı.");
+  try {
+    await updatePassword(pass);
+    alert("Şifre belirlendi. Bundan sonra e-posta ve şifreyle de girebilirsiniz.");
   } catch (err) { alert(err.message); }
 });
 

@@ -110,9 +110,15 @@ herkesin hesap açmasını engeller.
    kişileri ekleyin.
 
 Davet edilen kişi linke tıklayınca uygulamaya oturum açmış olarak düşer
-(oturum URL fragment'ından okunup adres çubuğundan silinir). Şifresi yoktur;
-ilk iş olarak **Passkey ekle** demesi gerekir, sonraki girişler passkey ile
-olur. Passkey'ini kaybederse panelden yeni davet gönderin.
+(oturum URL fragment'ından okunup adres çubuğundan silinir). Davetle gelen
+hesabın **şifresi yoktur**, bu yüzden çıkış yapmadan önce sol alttan biri
+yapılmalıdır:
+
+- **Passkey ekle** — sonraki girişler passkey ile.
+- **Şifre belirle** — e-posta + şifreyle de girilebilir hale gelir.
+
+İkisi de yapılmadan çıkış yapılırsa hesaba girilemez; panelden yeni davet
+göndermek gerekir.
 
 ### 4. Passkey (isteğe bağlı)
 
