@@ -494,6 +494,44 @@ METEN yeni girmiş, BETAE çıkmış, TUPRS 5,03 → 2,79 (−2,24 puan).
 - `restart: unless-stopped` sayesinde Docker yeniden başladığında site kendiliğinden
   geri gelir.
 
+## Kullanılan açık kaynak projeler
+
+Fonlu tamamen aşağıdaki projelerin üzerine kuruludur; emeği geçenlere teşekkürler.
+
+**Backend**
+
+| Proje | Lisans | Ne için |
+|---|---|---|
+| [pytefas](https://github.com/mirzazad/pytefas) | MIT | TEFAS fiyat ve dağılım verisi |
+| [FastAPI](https://github.com/fastapi/fastapi) | MIT | HTTP API |
+| [Uvicorn](https://uvicorn.dev/) | BSD-3-Clause | ASGI sunucusu |
+| [pandas](https://pandas.pydata.org/) | BSD-3-Clause | Seri ve getiri hesapları |
+| [Requests](https://github.com/psf/requests) | Apache-2.0 | KAP istekleri |
+| [pdfplumber](https://github.com/jsvine/pdfplumber) | MIT | KAP portföy raporu PDF ayrıştırma |
+| [HTTPX](https://github.com/encode/httpx) | BSD-3-Clause | Test istemcisi |
+| [psycopg](https://psycopg.org/) | LGPL-3.0 | Postgres sürücüsü ve bağlantı havuzu |
+| [PyJWT](https://github.com/jpadilla/pyjwt) | MIT | JWT doğrulama |
+
+`psycopg` LGPL-3.0'dır. Değiştirilmeden, standart bir kütüphane olarak kullanılır;
+kendi sürümünüzle değiştirmek isterseniz `requirements.txt`'i düzenlemeniz yeterlidir.
+
+**Frontend** (CDN'den, sürüm sabitlenmiş + SRI ile)
+
+| Proje | Lisans | Ne için |
+|---|---|---|
+| [Chart.js](https://github.com/chartjs/Chart.js) | MIT | Fiyat, karşılaştırma ve dağılım grafikleri |
+| [supabase-js](https://github.com/supabase/supabase-js) | MIT | Passkey (WebAuthn) töreni |
+
+**Altyapı** — [Supabase](https://supabase.com) (Postgres + Auth),
+[Docker](https://www.docker.com), isteğe bağlı olarak
+[Watchtower](https://github.com/containrrr/watchtower) (Apache-2.0) ve
+[Tailscale](https://tailscale.com).
+
+**Veri kaynakları** — Fiyat ve portföy dağılımı [TEFAS](https://www.tefas.gov.tr)'tan,
+fon bildirimleri ve portföy dağılım raporları [KAP](https://www.kap.org.tr)'tan gelir.
+Veriler bu kurumlara aittir; Fonlu yalnızca kamuya açık uçlarından okur, herhangi bir
+resmî bağlantısı yoktur.
+
 ## Sorumluluk reddi
 
 Fonlu bir kişisel takip aracıdır, yatırım tavsiyesi değildir. Veriler TEFAS ve KAP'ın
