@@ -80,8 +80,13 @@ Windows tarafında pull'u Watchtower yapıyor. Bir kez kurulur, sonra her push
 kendiliğinden inip konteyneri yeniler (env ve port ayarları korunur):
 
 ```bash
-docker run -d --name watchtower --restart unless-stopped -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --cleanup --interval 300 fonlu
+docker run -d --name watchtower --restart unless-stopped -v /var/run/docker.sock:/var/run/docker.sock -e REPO_USER=kullanici -e REPO_PASS=<hub-access-token> containrrr/watchtower --cleanup --interval 300 fonlu
 ```
+
+`REPO_USER`/`REPO_PASS` repo private olduğu için gerekiyor; token'ı Hub'da
+Account Settings → Personal access tokens'tan read-only üretin. Docker
+Desktop'ta `~/.docker/config.json`'ı mount etmek yetmez, o dosya şifreyi
+tutmuyor (`credsStore: desktop`). Repo public ise ikisini de silin.
 
 Sondaki `fonlu` sadece o konteyneri izler; makinedeki başka konteynerlere
 dokunmaz. `--cleanup` eski imaj katmanlarını siler, disk şişmez.
