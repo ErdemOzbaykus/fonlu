@@ -24,7 +24,6 @@ async function gotrue(path, body) {
 
 const signIn = (email, password) =>
   gotrue("/token?grant_type=password", { email, password }).then(session.set);
-const signUp = (email, password) => gotrue("/signup", { email, password });
 
 // Passkey: WebAuthn toreni (base64url donusumleri, navigator.credentials)
 // supabase-js'te hazir; elde yazmak ~60 satir kodlama yamasi demekti.
@@ -1042,16 +1041,6 @@ $("auth-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   authError("");
   try {
-    await signIn($("auth-email").value.trim(), $("auth-pass").value);
-    await start();
-  } catch (err) { authError(err.message); }
-});
-
-$("auth-signup").addEventListener("click", async () => {
-  authError("");
-  try {
-    await signUp($("auth-email").value.trim(), $("auth-pass").value);
-    // E-posta dogrulamasi kapali, kayit aninda giris yapilabiliyor.
     await signIn($("auth-email").value.trim(), $("auth-pass").value);
     await start();
   } catch (err) { authError(err.message); }
