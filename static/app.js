@@ -1093,16 +1093,24 @@ $("set-pass").addEventListener("click", async () => {
 
 $("logout").addEventListener("click", () => { session.clear(); location.reload(); });
 
-// Davet ve sifre sifirlama linkleri oturumu URL fragment'inda getiriyor
-// (#access_token=...). Tuketip adres cubugundan siliyoruz: token URL'de
-// kalirsa tarayici gecmisine yaziliyor ve link paylasilirsa oturum da gidiyor.
-function sessionFromHash() {
-  const p = new URLSearchParams(location.hash.slice(1));
-  const access_token = p.get("access_token");
-  if (!access_token) return;
-  session.set({ access_token, refresh_token: p.get("refresh_token") });
+// Davet ve sifre sifirlama linkleri sonucu URL fragment'inda getiriyor:
+// ya #access_token=... ya da #error=... . Fragment'i her halukarda adres
+// cubugundan siliyoruz; token URL'de kalirsa tarayici gecmisine yaziliyor ve
+// link paylasilirsa oturum da gidiyor.
+const hash = new URLSearchParams(location.hash.slice(1));
+if (location.hash.length > 1) {
   history.replaceState(null, "", location.pathname + location.search);
 }
 
-sessionFromHash();
-start();
+const hashToken = hash.get("access_token");
+if (hashToken) {
+  session.set({ access_token: hashToken, refresh_token: hash.get("refresh_token") });
+}
+
+start().then(() => {
+  // Davet token'i tek kullanimlik: link ikinci kez acilirsa (ya da suresi
+  // dolduysa) buraya hata ile donuyor. Sessizce yutulursa kullanici sebepsiz
+  // bir giris ekraninda kaliyor.
+  const err = hash.get("error_description") || hash.get("error");
+  if (err && !hashToken) authError(`Davet linki gecersiz: ${err}`);
+});
