@@ -316,6 +316,20 @@ assert by_code["ASELS"]["delta"] == 22.5 and by_code["ASELS"]["prev_weight_pct"]
 assert by_code["EREGL"]["status"] == "cikti" and by_code["EREGL"]["weight_pct"] == 0.0
 assert by_code["EREGL"]["delta"] == -15.0
 
+# --- yeni rapor gelince otomatik tazeleme kuyrugu ---
+with connect_test(SCHEMA) as conn:
+    # elde 2026-08-10 raporu var, ekli yeni rapor yok -> tazelenecek fon yok
+    assert main._stale_holdings(conn) == []
+    conn.execute("INSERT INTO kap_disclosures VALUES (1000,'AAA','2026-09-10 09:00:00',"
+                 "'A FONU','Portföy Dağılım Raporu','Agustos','DG',1)")
+    # ekli ve daha yeni rapor -> fon kullanicidan bagimsiz tazelenmeli
+    assert main._stale_holdings(conn) == ["AAA"]
+    # hic ayiklanmamis fon otomatik kuyruga girmez (kullanici bir kez tetiklemeli)
+    conn.execute("INSERT INTO kap_disclosures VALUES (1001,'BBB','2026-09-10 09:00:00',"
+                 "'B FONU','Portföy Dağılım Raporu','Agustos','DG',1)")
+    assert main._stale_holdings(conn) == ["AAA"]
+    conn.rollback()
+
 # a section the extraction disagrees with must not be offered as detail
 assert main._match(92.5, 92.5) == "tam"
 assert main._match(92.5, 60.0) == "kismi"

@@ -61,6 +61,10 @@ def _run_sync(days=None, kap_only=False):
                 kap.sync(conn, days=1, log=log)
         else:
             store.sync(days=days, log=log)
+        # KAP adimi yeni portfoy dagilim raporu getirmis olabilir; bir kez
+        # ayiklanmis fonlarin kalemleri el degmeden guncellensin.
+        with store.get_pool().connection() as conn:
+            refresh_holdings(conn, log=log)
     except Exception as exc:  # surfaced through /api/status
         refresh_state["error"] = str(exc)
     finally:
@@ -652,15 +656,14 @@ def fund_holdings(code: str, conn: Db, user: User):
     }
 
 
-@app.post("/api/funds/{code}/holdings")
-def extract_holdings(code: str, conn: Db, user: User):
-    """Son iki 'Portfoy Dagilim Raporu' PDF'ini indirip kalemleri cikarir.
+def _extract_holdings(conn, code: str) -> int:
+    """Son iki 'Portfoy Dagilim Raporu' PDF'ini indirip kalemleri yazar.
 
     Iki rapor cekiliyor cunku ay bazli kiyas (varlik yeni mi, agirligi degisti mi)
-    ancak onceki ayin raporu elde varsa yapilabiliyor. Senkron calisir (20-40 sn):
-    kullanicinin bilerek tetikledigi tek fonluk bir islem.
+    ancak onceki ayin raporu elde varsa yapilabiliyor. Senkron calisir (20-40 sn).
+    Hem kullanicinin tetikledigi POST hem de senkron sonrasi otomatik tazeleme
+    buradan geciyor.
     """
-    code = code.upper()
     reports = conn.execute(
         "SELECT disclosure_index, publish_date FROM kap_disclosures"
         " WHERE fund_code = %s AND subject LIKE 'Portföy Dağılım%%' AND attachment_count > 0"
@@ -691,8 +694,49 @@ def extract_holdings(code: str, conn: Db, user: User):
             )
         stored += len(parsed)
     conn.commit()
+    return stored
 
-    if not stored:
+
+def _stale_holdings(conn) -> list[str]:
+    """Bir kez ayiklanmis ama sonrasinda yeni rapor yayinlanmis fonlarin kodlari.
+
+    publish_date metin oldugu icin ilk 10 karakter tarihe cevriliyor (schema notu).
+    """
+    return [r["fund_code"] for r in conn.execute(
+        "SELECT h.fund_code FROM (SELECT fund_code, MAX(report_date) AS md"
+        "   FROM holdings GROUP BY fund_code) h"
+        " JOIN kap_disclosures k ON k.fund_code = h.fund_code"
+        " WHERE k.subject LIKE 'Portföy Dağılım%%' AND k.attachment_count > 0"
+        "   AND LEFT(k.publish_date, 10)::date > h.md"
+        " GROUP BY h.fund_code").fetchall()]
+
+
+def refresh_holdings(conn, log=print) -> int:
+    """Yeni portfoy dagilim raporu gelen fonlarin kalemlerini yeniden ayiklar.
+
+    Kullanici bir fonu bir kez ayikladiginda o fon takipte sayiliyor; sonraki
+    aylarda KAP raporu geldiginde el degmeden guncelleniyor. Bir fonda hata
+    olursa digerleri devam eder.
+    """
+    codes = _stale_holdings(conn)
+    if codes:
+        log(f"Kalem tazeleme: {len(codes)} fon ({', '.join(codes[:10])})")
+    done = 0
+    for code in codes:
+        try:
+            _extract_holdings(conn, code)
+            done += 1
+        except Exception as exc:   # HTTPException dahil: tek fon tum turu bozmasin
+            conn.rollback()
+            log(f"{code}: kalem tazeleme basarisiz -- {exc}")
+    return done
+
+
+@app.post("/api/funds/{code}/holdings")
+def extract_holdings(code: str, conn: Db, user: User):
+    """Kullanicinin bilerek tetikledigi tek fonluk ayiklama."""
+    code = code.upper()
+    if not _extract_holdings(conn, code):
         raise HTTPException(
             422,
             "Rapor okundu ama kalem çıkarılamadı — bu kurucunun PDF düzeni "
