@@ -103,8 +103,16 @@ Uygulamada kayıt ekranı **yoktur** — bu bilinçli bir tercihtir; adresi bile
 herkesin hesap açmasını engeller.
 
 1. Authentication → Sign In / Providers → **Allow new users to sign up** kapalı.
-2. Authentication → Users → **Invite user** ile kendinizi ve paylaşacağınız
+2. Authentication → URL Configuration → **Site URL**'i uygulamanın gerçek
+   adresi yapın (varsayılan `http://localhost:3000`, davet linkleri oraya
+   gider ve açılmaz). Aynı adresi **Redirect URLs**'e de ekleyin.
+3. Authentication → Users → **Invite user** ile kendinizi ve paylaşacağınız
    kişileri ekleyin.
+
+Davet edilen kişi linke tıklayınca uygulamaya oturum açmış olarak düşer
+(oturum URL fragment'ından okunup adres çubuğundan silinir). Şifresi yoktur;
+ilk iş olarak **Passkey ekle** demesi gerekir, sonraki girişler passkey ile
+olur. Passkey'ini kaybederse panelden yeni davet gönderin.
 
 ### 4. Passkey (isteğe bağlı)
 

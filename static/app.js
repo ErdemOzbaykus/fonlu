@@ -1063,4 +1063,16 @@ $("add-passkey").addEventListener("click", async () => {
 
 $("logout").addEventListener("click", () => { session.clear(); location.reload(); });
 
+// Davet ve sifre sifirlama linkleri oturumu URL fragment'inda getiriyor
+// (#access_token=...). Tuketip adres cubugundan siliyoruz: token URL'de
+// kalirsa tarayici gecmisine yaziliyor ve link paylasilirsa oturum da gidiyor.
+function sessionFromHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  const access_token = p.get("access_token");
+  if (!access_token) return;
+  session.set({ access_token, refresh_token: p.get("refresh_token") });
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
+sessionFromHash();
 start();
