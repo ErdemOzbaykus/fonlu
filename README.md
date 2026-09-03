@@ -532,6 +532,11 @@ fon bildirimleri ve portföy dağılım raporları [KAP](https://www.kap.org.tr)
 Veriler bu kurumlara aittir; Fonlu yalnızca kamuya açık uçlarından okur, herhangi bir
 resmî bağlantısı yoktur.
 
+## Lisans
+
+[MIT](LICENSE). Kullanılan üçüncü taraf kütüphaneler kendi lisanslarına tabidir;
+listesi yukarıda.
+
 ## Sorumluluk reddi
 
 Fonlu bir kişisel takip aracıdır, yatırım tavsiyesi değildir. Veriler TEFAS ve KAP'ın
