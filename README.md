@@ -241,7 +241,7 @@ girmez. Apple Silicon'da üretilen imaj arm64 olur ve amd64 makinede `no matchin
 manifest` der, bu yüzden hedef mimari açıkça verilir:
 
 ```bash
-FONLU_IMAGE=<kullanici>/fonlu:latest ./scripts/deploy.sh
+docker buildx build --platform linux/amd64 -t <kullanici>/fonlu:latest --push .
 ```
 
 Hedef makinede `.env` şablonunu imajın içinden çıkarıp doldurun:
