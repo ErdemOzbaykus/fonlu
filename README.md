@@ -66,6 +66,26 @@ docker run -d --name fonlu --env-file .env -p 8000:8000 kullaniciadi/fonlu:lates
 Değişkenler eksikse konteyner açılışta `DATABASE_URL tanimli degil` diyip duruyor —
 `docker logs fonlu` ile görünür.
 
+### Otomatik dağıtım
+
+Mac'te tek komut derleyip Hub'a atar:
+
+```bash
+./scripts/deploy.sh
+```
+
+Başka imaj adı için `FONLU_IMAGE=kullanici/fonlu:latest ./scripts/deploy.sh`.
+
+Windows tarafında pull'u Watchtower yapıyor. Bir kez kurulur, sonra her push
+kendiliğinden inip konteyneri yeniler (env ve port ayarları korunur):
+
+```bash
+docker run -d --name watchtower --restart unless-stopped -v /var/run/docker.sock:/var/run/docker.sock containrrr/watchtower --cleanup --interval 300 fonlu
+```
+
+Sondaki `fonlu` sadece o konteyneri izler; makinedeki başka konteynerlere
+dokunmaz. `--cleanup` eski imaj katmanlarını siler, disk şişmez.
+
 ### Aynı ağdaki başka cihazdan
 
 Konteyner zaten `0.0.0.0:8000`'e bağlı, ekstra ayar yok. Telefon/tablet aynı Wi-Fi'daysa:
