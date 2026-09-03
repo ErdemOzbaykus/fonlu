@@ -7,6 +7,9 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
         integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4"
         crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.114.0/dist/umd/supabase.js"
+        integrity="sha384-UxmVkfpcoSCBn4QrHwxxZVlCbloMpP/2Ay2ByWcNy6TcMxC3JUgqa8Geipyl0tP7"
+        crossorigin="anonymous"></script>
 <style>
 :root {
   --ink:#12161f; --surface:#191e29; --raised:#212837; --line:#2c3446;
@@ -447,6 +450,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
     <p id="auth-error" class="down" hidden></p>
     <button class="btn primary" type="submit">Giriş yap</button>
     <button class="btn ghost" type="button" id="auth-signup">Kayıt ol</button>
+    <button class="btn ghost" type="button" id="auth-passkey">Passkey ile giriş</button>
   </form>
 </div>
 
@@ -465,6 +469,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   <div class="rail-foot">
     <p id="status">Yükleniyor…</p>
     <button class="btn ghost" id="refresh" style="width:100%">Veriyi güncelle</button>
+    <button class="btn ghost" id="add-passkey" style="width:100%;margin-top:6px">Passkey ekle</button>
     <button class="btn ghost" id="logout" style="width:100%;margin-top:6px">Çıkış</button>
   </div>
 </aside>

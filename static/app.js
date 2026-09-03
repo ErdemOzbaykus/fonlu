@@ -26,6 +26,34 @@ const signIn = (email, password) =>
   gotrue("/token?grant_type=password", { email, password }).then(session.set);
 const signUp = (email, password) => gotrue("/signup", { email, password });
 
+// Passkey: WebAuthn toreni (base64url donusumleri, navigator.credentials)
+// supabase-js'te hazir; elde yazmak ~60 satir kodlama yamasi demekti.
+// Kutuphane kendi oturum kabini tutmasin, oturum yine yukaridaki session'da.
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    experimental: { passkey: true },
+  },
+});
+
+async function passkeySignIn() {
+  const { data, error } = await sb.auth.signInWithPasskey();
+  if (error) throw error;
+  session.set(data.session);
+}
+
+// Passkey kaydi giris yapmis kullanici ister; token'i kutuphaneye devret.
+async function passkeyRegister() {
+  const s = session.get();
+  await sb.auth.setSession({
+    access_token: s.access_token,
+    refresh_token: s.refresh_token,
+  });
+  const { error } = await sb.auth.registerPasskey();
+  if (error) throw error;
+}
+
 // Access token 1 saatte doluyor; refresh token'la sessizce yenile.
 async function refresh() {
   const s = session.get();
@@ -1027,6 +1055,21 @@ $("auth-signup").addEventListener("click", async () => {
     await signIn($("auth-email").value.trim(), $("auth-pass").value);
     await start();
   } catch (err) { authError(err.message); }
+});
+
+$("auth-passkey").addEventListener("click", async () => {
+  authError("");
+  try {
+    await passkeySignIn();
+    await start();
+  } catch (err) { authError(err.message); }
+});
+
+$("add-passkey").addEventListener("click", async () => {
+  try {
+    await passkeyRegister();
+    alert("Passkey eklendi.");
+  } catch (err) { alert(err.message); }
 });
 
 $("logout").addEventListener("click", () => { session.clear(); location.reload(); });
