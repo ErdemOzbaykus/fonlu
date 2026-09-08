@@ -196,6 +196,15 @@ docker compose ps
 
 Durdurmak için `docker compose down`.
 
+#### Tek işçiyle çalıştırın
+
+`fonlu/main.py` içindeki `_scheduler()` süreç içi bir zamanlayıcı: her saatin
+5'inde uyanıp senkronu kendisi tetikliyor. uvicorn'a `--workers` verilirse her
+işçi kendi zamanlayıcısını başlatır ve aynı senkron birden çok kez tetiklenir.
+Bu yüzden uvicorn tek işçiyle koşmalı (compose dosyasındaki varsayılan budur).
+Ölçekleme gerekirse zamanlayıcıyı uygulamadan çıkarıp ayrı bir cron sürecine
+taşıyın; uçlar `--workers` ile sorunsuz çoğalır.
+
 ## Veriyi doldurma ve güncelleme
 
 TEFAS dakikada 6 istek kabul ediyor ve 90 günlük çekim birkaç dakika sürüyor; bu

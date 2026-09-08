@@ -2,6 +2,7 @@
 talks to TEFAS, and it does so in the background."""
 
 import calendar
+import logging
 import os
 import re
 import threading
@@ -32,7 +33,14 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="Fonlu API", lifespan=lifespan)
+# Uygulama public bir adreste; API yuzeyini disariya haritalatmaya gerek yok.
+app = FastAPI(
+    title="Fonlu API",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # Tarama yaniti sikistirilmadan ~1.2 MB; gzip'le ~10'da birine iniyor. Telefon
 # baglantisinda listenin gec gelmesinin en buyuk sebebi buydu.
@@ -45,6 +53,8 @@ for _var in ("DATABASE_URL", "SUPABASE_URL"):
         raise RuntimeError(f"{_var} tanimli degil: .env dosyasini konteynere verin.")
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
+
+log_ = logging.getLogger(__name__)
 
 refresh_state = {"running": False, "log": [], "error": None}
 
@@ -65,8 +75,11 @@ def _run_sync(days=None, kap_only=False):
         # ayiklanmis fonlarin kalemleri el degmeden guncellensin.
         with store.get_pool().connection() as conn:
             refresh_holdings(conn, log=log)
-    except Exception as exc:  # surfaced through /api/status
-        refresh_state["error"] = str(exc)
+    except Exception:
+        # Ham istisna metni DATABASE_URL'i (dolayisiyla parolayi) icerebiliyor;
+        # ayrinti loglarda kalsin, istemciye sabit mesaj gitsin.
+        log_.exception("Senkronizasyon basarisiz")
+        refresh_state["error"] = "Senkronizasyon basarisiz, loglara bakin"
     finally:
         refresh_state["running"] = False
 
@@ -130,7 +143,8 @@ def _bad_param(request, exc):
 
 @app.exception_handler(TefasAPIError)
 def _api_error(request, exc):
-    return JSONResponse({"detail": f"TEFAS su an yanit vermiyor: {exc}"}, 502)
+    log_.warning("TEFAS API hatasi: %s", exc)
+    return JSONResponse({"detail": "TEFAS su an yanit vermiyor."}, 502)
 
 
 def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
