@@ -63,10 +63,14 @@ log_ = logging.getLogger(__name__)
 refresh_state = {"running": False, "log": [], "error": None}
 
 
-def _run_sync(days=None, kap_only=False):
-    """Hem /api/refresh'in hem zamanlayicinin kullandigi tek senkron yolu."""
+def _run_sync(days=None, kap_only=False) -> bool:
+    """Hem /api/refresh'in hem zamanlayicinin kullandigi tek senkron yolu.
+
+    Isi yaptiysa True, baska bir kosum surdugu icin atladiysa False doner:
+    cron ucu ikisini ayirt edebilsin.
+    """
     if refresh_state["running"]:
-        return
+        return False
     refresh_state.update(running=True, log=[], error=None)
     log = refresh_state["log"].append
     try:
@@ -86,6 +90,7 @@ def _run_sync(days=None, kap_only=False):
         refresh_state["error"] = "Senkronizasyon basarisiz, loglara bakin"
     finally:
         refresh_state["running"] = False
+    return True
 
 
 def _next_wake(now: datetime) -> datetime:
@@ -198,7 +203,10 @@ def cron_sync(request: Request, kap_only: bool = False):
     header = request.headers.get("authorization", "")
     if not secret or not secrets.compare_digest(header, f"Bearer {secret}"):
         raise HTTPException(401, "Giris gerekli.")
-    _run_sync(kap_only=kap_only)
+    if not _run_sync(kap_only=kap_only):
+        # Atlanan kosumu 200 dondurmek cron'da sessiz veri bayatlamasi demek:
+        # yarim kalmis baska bir kosumun log'u "basarili" gibi gorunuyordu.
+        raise HTTPException(409, "Senkron zaten calisiyor.")
     return {"error": refresh_state["error"], "log": refresh_state["log"]}
 
 
