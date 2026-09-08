@@ -328,6 +328,19 @@ with connect_test(SCHEMA) as conn:
     conn.execute("INSERT INTO kap_disclosures VALUES (1001,'BBB','2026-09-10 09:00:00',"
                  "'B FONU','Portföy Dağılım Raporu','Agustos','DG',1)")
     assert main._stale_holdings(conn) == ["AAA"]
+    # ayni gun ikinci rapor: tarih esit ama disclosure_index yeni -> yine tazelenmeli
+    conn.execute("INSERT INTO kap_disclosures VALUES (1002,'AAA','2026-08-10 18:00:00',"
+                 "'A FONU','Portföy Dağılım Raporu','Temmuz','DG',1)")
+    assert main._stale_holdings(conn) == ["AAA"]
+    conn.rollback()
+
+    # KAP bozuk publish_date gonderdiginde (kap._iso ham degeri sakliyor) sorgu
+    # patlamamali: bozuk satir suzuluyor, senkron akisi ayakta kaliyor
+    conn.execute("INSERT INTO kap_disclosures VALUES (1003,'AAA','bozuk tarih',"
+                 "'A FONU','Portföy Dağılım Raporu','Agustos','DG',1)")
+    conn.execute("INSERT INTO kap_disclosures VALUES (1004,'AAA','',"
+                 "'A FONU','Portföy Dağılım Raporu','Agustos','DG',1)")
+    assert main._stale_holdings(conn) == []
     conn.rollback()
 
 # a section the extraction disagrees with must not be offered as detail
