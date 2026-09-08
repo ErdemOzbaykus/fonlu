@@ -6,7 +6,9 @@ toplar; KAP'ın aylık portföy dağılım raporu PDF'lerinden fonun **hangi his
 ne kadar tuttuğunu** çıkarır — bu bilgi TEFAS'ta yok.
 
 Kendi kendine barındırılır (self-hosted): tek Docker konteyneri + kendi Supabase
-projeniz. Ortak bir sunucu ya da üçüncü taraf servis yok.
+projeniz. Ortak bir sunucu ya da üçüncü taraf servis yok. Kendi makinenizi ayakta
+tutmak istemiyorsanız aynı uygulama [Vercel'e de dağıtılabiliyor](#vercele-dağıtım);
+veritabanı her iki durumda da sizin Supabase projeniz.
 
 ## Ne yapar
 
@@ -31,7 +33,7 @@ alt sekme çubuğuna, tablolar kartlara dönüşür.
 | Veritabanı | Supabase Postgres, session pooler üzerinden |
 | Kimlik | Supabase Auth — şifre veya passkey (WebAuthn) |
 | Frontend | Bağımlılıksız vanilla JS + Chart.js; derleme adımı yok |
-| Çalıştırma | Yalnızca Docker; host'ta Python kurulumu gerekmez |
+| Çalıştırma | Docker (tek konteyner) ya da Vercel (serverless); host'ta Python kurulumu gerekmez |
 
 API-first: tüm veri `/api/*` üzerinden gelir, frontend yalnızca bir tüketicidir.
 
@@ -205,6 +207,10 @@ Bu yüzden uvicorn tek işçiyle koşmalı (compose dosyasındaki varsayılan bu
 Ölçekleme gerekirse zamanlayıcıyı uygulamadan çıkarıp ayrı bir cron sürecine
 taşıyın; uçlar `--workers` ile sorunsuz çoğalır.
 
+Zamanlayıcı `VERCEL` ortam değişkeni tanımlıysa hiç başlatılmıyor: serverless'ta
+süreç istekler arasında donduruluyor, uyuyan bir thread ilerlemiyor. Vercel'de
+senkronu dışarıdan cron tetikliyor, bkz. [Vercel'e dağıtım](#vercele-dağıtım).
+
 ## Veriyi doldurma ve güncelleme
 
 TEFAS dakikada 6 istek kabul ediyor ve 90 günlük çekim birkaç dakika sürüyor; bu
@@ -293,6 +299,126 @@ docker run -d --name watchtower --restart unless-stopped \
 - `DOCKER_API_VERSION` şarttır: watchtower imajı bakımsızdır, Docker API'sini
   varsayılan 1.25 ile konuşur ve Docker 29 `client version 1.25 is too old` der.
 
+## Vercel'e dağıtım
+
+Docker'a alternatif: aynı FastAPI uygulaması Vercel'de serverless fonksiyon olarak
+koşuyor. Kurulum bölümündeki Supabase adımları (1-4 ve 6) aynen geçerli; değişen
+yalnızca `.env` yerine Vercel ortam değişkenleri ve çalıştırma adımı.
+
+Gereken iki dosya repoda hazır:
+
+- [`api/index.py`](api/index.py) — ASGI girişi, Vercel'in Python runtime'ı buradaki
+  `app` nesnesini alıyor.
+- [`vercel.json`](vercel.json) — `static/**`'ı fonksiyon paketine dahil eder,
+  `maxDuration` 60 sn, günlük cron tanımı.
+
+### 1. Projeyi bağlayın
+
+Vercel → Add New → Project → bu GitHub deposunu seçin. Framework `fastapi` olarak
+algılanıyor; build ya da output ayarı girmenize gerek yok. Her `main` push'u
+kendiliğinden dağıtılır.
+
+### 2. Ortam değişkenleri
+
+Settings → Environment Variables (Production):
+
+| Değişken | Değer |
+|---|---|
+| `DATABASE_URL` | `fonlu_app` DSN'i — pooler adresi, Docker'daki ile aynı |
+| `SUPABASE_URL` | `https://<ref>.supabase.co` |
+| `CRON_SECRET` | `openssl rand -hex 32` çıktısı; cron ucunu koruyan sır |
+
+Değişken ekledikten sonra **redeploy şart** — mevcut dağıtım yeni değerleri almaz.
+Eksik değişkende uygulama import anında `DATABASE_URL tanimli degil` diyerek
+patlar ve fonksiyon 500 döner; sebep runtime log'unda görünür.
+
+Bağlantı havuzu her lambda örneğinde ayrı açılıyor (`max_size=10`,
+[`fonlu/store.py`](fonlu/store.py)). Bu yüzden Supabase'in **transaction pooler**
+adresi (port 6543) session pooler'a tercih edilmeli.
+
+### 3. Erişimi açın
+
+Yeni Vercel projeleri **Deployment Protection** arkasında doğuyor; kapatmazsanız
+uygulamanın giriş ekranına bile ulaşılamaz, her istek Vercel SSO'ya yönlenir.
+Settings → Deployment Protection → Vercel Authentication'ı kapatın. Uygulamanın
+kendi koruması (kapalı kayıt + her uçta JWT) zaten yerinde.
+
+Sonra Supabase tarafında Site URL, Redirect URLs ve passkey kullanıyorsanız
+Relying Party ID / Origins değerlerini Vercel alan adına çevirin.
+
+### 4. Zamanlanmış senkron
+
+Süreç içi zamanlayıcı Vercel'de kapalı olduğu için senkronu iki dış tetikleyici
+yürütüyor:
+
+| Ne | Nereden | Sıklık |
+|---|---|---|
+| Tam senkron — fiyat + dağılım + KAP + kalemler | Vercel Cron (`vercel.json`) | günde bir, 07:05 UTC (10:05 TRT) |
+| Yalnız KAP bildirimleri | Supabase `pg_cron` | saat başı |
+
+Neden ikisi: Vercel'in Hobby planında cron **günde bir kez** çalışıyor. KAP'ın
+push ucu yok, bildirim ancak yoklandığında düşüyor; günlük yoklama gecikmeyi
+~24 saate çıkarıyordu. Saatlik yoklama için zaten bağlı olduğunuz Supabase
+kullanılıyor — yeni bir üçüncü taraf servis girmiyor.
+
+Dashboard → Database → Extensions'tan `pg_cron` ve `pg_net`'i etkinleştirin, sonra
+SQL Editor'de sırayla:
+
+```sql
+-- Sır düz metin durmasın: Vault'a koyup işten adıyla okuyoruz.
+select vault.create_secret('<CRON_SECRET>', 'fonlu_cron_secret', 'Fonlu cron bearer');
+```
+
+```sql
+select cron.schedule('fonlu-kap-hourly', '5 * * * *', $$
+  select net.http_get(
+    url := 'https://<proje>.vercel.app/api/cron/sync?kap_only=true',
+    headers := jsonb_build_object('Authorization', 'Bearer ' || (
+      select decrypted_secret from vault.decrypted_secrets
+      where name = 'fonlu_cron_secret')),
+    timeout_milliseconds := 60000
+  );
+$$);
+```
+
+Sır `cron.job.command` içinde geçmiyor, çalışma anında Vault'tan okunuyor. İş
+`postgres` olarak koşuyor; uygulamanın `fonlu_app` rolünün `cron` ve `vault`
+şemalarında hiçbir yetkisi yok, pg_cron 1.4'ten beri `cron.job` satır bazlı
+izole.
+
+Doğrulama:
+
+```sql
+-- SQL adımı: pg_net asenkron olduğu için burası HTTP durumunu göstermez
+select status, return_message, start_time from cron.job_run_details
+order by start_time desc limit 5;
+
+-- Gerçek HTTP sonucu (satırlar ~6 saat sonra temizlenir)
+select status_code, content, created from net._http_response
+order by created desc limit 5;
+```
+
+Beklenen: `200` ve gövdede `KAP bitti. N bildirim islendi.`
+
+### Cron ucu
+
+`GET /api/cron/sync`, `Authorization: Bearer $CRON_SECRET` ister:
+
+| Yanıt | Anlamı |
+|---|---|
+| `200` | Senkron koştu; gövdedeki `log` o koşuma ait |
+| `409` | Başka bir koşum sürüyor, iş atlandı |
+| `401` | Sır yanlış ya da `CRON_SECRET` tanımlı değil (o durumda uç tamamen kapalı) |
+
+Parametreler: `kap_only=true` yalnız KAP adımını koşturur (saniyeler sürer),
+`days=N` son N günü yeniden çeker — fiyatlar güncelken uç `"Guncel, yapilacak is
+yok."` deyip erken döndüğü için ağır yolu sınamanın yolu budur.
+
+Ölçüm: 3 günlük tam senkron (4946 fiyat satırı + üç tür dağılım + 764 KAP
+bildirimi) ≈ 43 sn sürüyor, `maxDuration: 60` içinde kalıyor. Günlük koşum tek
+gün çektiği için daha hafif. İleride sınıra dayanırsa işi tür ya da gün bazında
+ayrı cron girdilerine bölmek gerekir.
+
 ## Uzaktan erişim
 
 Konteyner `0.0.0.0:8000`'e bağlıdır. Aynı Wi-Fi'daki bir cihazdan host'un `.local`
@@ -338,6 +464,7 @@ Her iki durumda da Supabase'deki **Relying Party ID**'yi bu hostname'e ayarlayı
 |---|---|
 | `GET /api/status` | Önbellek durumu, son veri tarihi, çalışan güncelleme |
 | `POST /api/refresh?days=` | Arka planda TEFAS + KAP çekimi (`days` yoksa artımlı) |
+| `GET /api/cron/sync` | Cron tetiklemesi; `CRON_SECRET` bearer'ı ister. `kap_only=true` yalnız KAP, `days=N` geçmişe dönük çekim |
 | `GET /api/funds` | `kind`, `start`, `end`, `q`, `category`, `min_return`, `max_return`, `min_size`, `limit` |
 | `GET /api/funds/{kod}` | Fiyat serisi, dönem getirileri, volatilite, max düşüş, dağılım |
 | `GET /api/funds/{kod}/kap` | Fonun KAP bildirimleri (önbellekten) |
@@ -490,6 +617,10 @@ METEN yeni girmiş, BETAE çıkmış, TUPRS 5,03 → 2,79 (−2,24 puan).
 | `no matching manifest` | İmaj arm64, hedef amd64 — `deploy.sh` ile üretin |
 | `Oturum gecersiz: ... (iat)` | Konteyner saati kaymış; kayma dakikalarcaysa Docker'ı yeniden başlatın |
 | Passkey butonu hata veriyor | HTTPS değilsiniz, ya da RP ID adresle uyuşmuyor |
+| Vercel'de `FUNCTION_INVOCATION_FAILED` | Ortam değişkeni eksik ya da eklendikten sonra redeploy edilmedi; sebep runtime log'unda |
+| Vercel'de her istek Vercel SSO'ya gidiyor | Deployment Protection açık; Settings → Deployment Protection'dan kapatın |
+| Cron ucu `401` | `CRON_SECRET` Vercel'deki ile Vault'taki farklı; Vault sırrını güncelleyin |
+| `cron.job_run_details` başarılı ama veri gelmiyor | pg_net asenkron, HTTP durumu `net._http_response`'ta — oraya bakın |
 
 ## Notlar
 
