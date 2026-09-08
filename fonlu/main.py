@@ -188,7 +188,8 @@ def refresh(tasks: BackgroundTasks, user: User,
 
 
 @app.get("/api/cron/sync")
-def cron_sync(request: Request, kap_only: bool = False):
+def cron_sync(request: Request, kap_only: bool = False,
+              days: Optional[int] = Query(None, ge=1, le=730)):
     """Vercel Cron ucu. Serverless'ta surec ici zamanlayici calismadigi icin
     senkronu disaridan bu tetikliyor.
 
@@ -203,7 +204,7 @@ def cron_sync(request: Request, kap_only: bool = False):
     header = request.headers.get("authorization", "")
     if not secret or not secrets.compare_digest(header, f"Bearer {secret}"):
         raise HTTPException(401, "Giris gerekli.")
-    if not _run_sync(kap_only=kap_only):
+    if not _run_sync(days=days, kap_only=kap_only):
         # Atlanan kosumu 200 dondurmek cron'da sessiz veri bayatlamasi demek:
         # yarim kalmis baska bir kosumun log'u "basarili" gibi gorunuyordu.
         raise HTTPException(409, "Senkron zaten calisiyor.")
