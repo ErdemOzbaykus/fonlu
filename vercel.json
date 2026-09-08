@@ -4,5 +4,8 @@
       "includeFiles": "static/**",
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/cron/sync", "schedule": "5 7 * * *" }
+  ]
 }

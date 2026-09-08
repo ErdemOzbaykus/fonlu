@@ -5,6 +5,7 @@ import calendar
 import logging
 import os
 import re
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 from typing import Annotated, Literal, Optional
 
 import psycopg
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -179,6 +180,26 @@ def refresh(tasks: BackgroundTasks, user: User,
     # bu noktada havuza geri verilmis oluyor.
     tasks.add_task(_run_sync, days)
     return {"status": "started"}
+
+
+@app.get("/api/cron/sync")
+def cron_sync(request: Request, kap_only: bool = False):
+    """Vercel Cron ucu. Serverless'ta surec ici zamanlayici calismadigi icin
+    senkronu disaridan bu tetikliyor.
+
+    Vercel `Authorization: Bearer $CRON_SECRET` yolluyor. Sir tanimsizsa uc
+    kapali kalsin: aksi halde herkesin tetikleyebilecegi bir senkron ucu olur.
+    BackgroundTasks kullanilmiyor; yanit dondukten sonra lambda donduruluyor,
+    is yarida kalirdi.
+    ponytail: tum senkron tek cagriya sigmak zorunda (maxDuration). Sure
+    asilirsa isi tur/gun parcalarina bolen ayri cron girdilerine tasi.
+    """
+    secret = os.environ.get("CRON_SECRET")
+    header = request.headers.get("authorization", "")
+    if not secret or not secrets.compare_digest(header, f"Bearer {secret}"):
+        raise HTTPException(401, "Giris gerekli.")
+    _run_sync(kap_only=kap_only)
+    return {"error": refresh_state["error"], "log": refresh_state["log"]}
 
 
 # ponytail: surec ici onbellek, dolu olunca komple bosalir -- LRU degil, ama

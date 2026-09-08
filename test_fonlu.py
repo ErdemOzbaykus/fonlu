@@ -568,4 +568,17 @@ assert _u(None) == []
 # fon turu = unvan turlerinin "...Fonu" ekli alt kumesi, ayri kural listesi yok
 assert set(main.TURLER) <= {main.FON_TURU[t] for t in main.UNVANLAR if t in main.FON_TURU}
 
+# ---- cron ucu ----
+# Sir tanimsizken uc kapali kalmali: aksi halde herkes senkron tetikler.
+_cron = TestClient(main.app)
+os.environ.pop("CRON_SECRET", None)
+assert _cron.get("/api/cron/sync").status_code == 401
+assert _cron.get("/api/cron/sync",
+                 headers={"Authorization": "Bearer x"}).status_code == 401
+os.environ["CRON_SECRET"] = "s3cret"
+assert _cron.get("/api/cron/sync").status_code == 401
+assert _cron.get("/api/cron/sync",
+                 headers={"Authorization": "Bearer yanlis"}).status_code == 401
+os.environ.pop("CRON_SECRET")
+
 print("ok")
