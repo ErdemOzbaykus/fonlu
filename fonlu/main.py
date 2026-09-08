@@ -667,20 +667,25 @@ def _extract_holdings(conn, code: str) -> int:
     reports = conn.execute(
         "SELECT disclosure_index, publish_date FROM kap_disclosures"
         " WHERE fund_code = %s AND subject LIKE 'Portföy Dağılım%%' AND attachment_count > 0"
-        " ORDER BY publish_date DESC LIMIT 2", (code,)
+        " ORDER BY publish_date DESC, disclosure_index DESC LIMIT 3", (code,)
     ).fetchall()
     if not reports:
         raise HTTPException(404, f"{code} icin ekli bir KAP portfoy dagilim raporu yok.")
 
-    stored = 0
+    stored, seen = 0, set()
     for report in reports:
         report_date = report["publish_date"][:10]
+        if report_date in seen:
+            continue   # ayni gun ikinci rapor: yenisi yazildi, eskisi ustune yazmasin
+        if len(seen) == 2:
+            break      # iki ayri gun yeter; LIMIT 3 sadece ayni gun tekrarina karsi
+        seen.add(report_date)
         try:
             atts = kap.attachments(report["disclosure_index"])
             parsed = holdings.parse(holdings.fetch_pdf(atts[0]["obj_id"])) if atts else []
         except kap.KapError as exc:
             # Onceki ay okunamazsa kiyas kaybolur ama guncel rapor yine degerli.
-            if report is reports[0]:
+            if len(seen) == 1:
                 raise HTTPException(502, str(exc))
             break
         conn.execute("DELETE FROM holdings WHERE fund_code = %s AND report_date = %s",
@@ -700,15 +705,22 @@ def _extract_holdings(conn, code: str) -> int:
 def _stale_holdings(conn) -> list[str]:
     """Bir kez ayiklanmis ama sonrasinda yeni rapor yayinlanmis fonlarin kodlari.
 
-    publish_date metin oldugu icin ilk 10 karakter tarihe cevriliyor (schema notu).
+    publish_date metin ve KAP bazen beklenmedik bir bicim gonderiyor (kap._iso
+    cevirmeyi basaramazsa ham degeri sakliyor); ::date cast'i boyle tek bir satirda
+    tum senkronu dusurdugu icin once bicim suzuluyor, kiyas ISO onekiyle metin
+    uzerinden yapiliyor. Ayni gun ikinci rapor gelirse disclosure_index ayirt ediyor.
     """
     return [r["fund_code"] for r in conn.execute(
-        "SELECT h.fund_code FROM (SELECT fund_code, MAX(report_date) AS md"
-        "   FROM holdings GROUP BY fund_code) h"
+        "SELECT h.fund_code FROM (SELECT DISTINCT ON (fund_code) fund_code,"
+        "   to_char(report_date, 'YYYY-MM-DD') AS md, disclosure_index AS mi"
+        "   FROM holdings ORDER BY fund_code, report_date DESC, disclosure_index DESC) h"
         " JOIN kap_disclosures k ON k.fund_code = h.fund_code"
         " WHERE k.subject LIKE 'Portföy Dağılım%%' AND k.attachment_count > 0"
-        "   AND LEFT(k.publish_date, 10)::date > h.md"
-        " GROUP BY h.fund_code").fetchall()]
+        "   AND k.publish_date ~ '^\\d{4}-\\d{2}-\\d{2}'"
+        "   AND (LEFT(k.publish_date, 10) > h.md"
+        "        OR (LEFT(k.publish_date, 10) = h.md"
+        "            AND k.disclosure_index > COALESCE(h.mi, 0)))"
+        " GROUP BY h.fund_code ORDER BY h.fund_code").fetchall()]
 
 
 def refresh_holdings(conn, log=print) -> int:
