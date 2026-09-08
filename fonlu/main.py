@@ -29,7 +29,10 @@ SYNC_HOUR = 10          # tam senkron saati (10:05)
 
 @asynccontextmanager
 async def lifespan(app):
-    threading.Thread(target=_scheduler, daemon=True).start()
+    # Serverless'ta (Vercel) surec istekler arasinda donduruluyor; surec ici
+    # zamanlayici orada calismaz, harici bir cron gerekir.
+    if not os.environ.get("VERCEL"):
+        threading.Thread(target=_scheduler, daemon=True).start()
     yield
 
 
