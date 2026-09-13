@@ -213,9 +213,11 @@ def cron_sync(request: Request, kap_only: bool = False,
     return {"error": refresh_state["error"], "log": refresh_state["log"]}
 
 
-# ponytail: surec ici onbellek. Anahtar avuc dolusu (donem x tur x arama) ama
-# tavana varinca komple bosaltmak donem dugmeleri arasinda gezinirken her seferinde
-# soguk sorguya dusuruyordu; OrderedDict ile en eski girdi atiliyor, gerisi kaliyor.
+# ponytail: surec ici onbellek. Anahtar (stamp, start, end, wanted) -- `kind` ve
+# `q` bilerek disarida, gerekcesi _scan'de; yani ayni donemin taramasini tur ve
+# arama ne olursa olsun tek girdi karsiliyor. Tavana varinca komple bosaltmak
+# donem dugmeleri arasinda gezinirken her seferinde soguk sorguya dusuruyordu;
+# OrderedDict ile en eski girdi atiliyor, gerisi kaliyor.
 # lru_cache kullanilamadi: `conn` anahtara girer, her istek yeni baglantiyla
 # gelince onbellek ise yaramazdi. Girdi basina ~5 MB; dar bellekte _SCAN_MAX'i dusur.
 _SCAN_MAX = 8
