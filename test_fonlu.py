@@ -108,6 +108,32 @@ def build_periods_client():
     return out
 
 
+def build_anchor_client():
+    """Donem baslangicindan ONCE birden fazla fiyati olan bir fon.
+
+    Ankor, pencere icindeki EN SON fiyat olmali (08-07), en eskisi degil (08-03).
+    Ikisini ayirt etmeyen bir sorgu donem getirisini sessizce yanlis hesaplar;
+    tek fiyatli DDD vakasi bu hatayi yakalamiyor.
+    """
+    schema = fresh_schema()
+    with connect_test(schema) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO prices (fund_code,date,kind,fund_name,price)"
+                " VALUES ('EEE',%s,'YAT','Test EEE',%s)",
+                [("2026-08-03", 40.0), ("2026-08-07", 50.0), ("2026-08-12", 60.0)])
+        conn.commit()
+    _override(schema)
+    # Tarama onbellegi surec genelinde ve anahtari semayi bilmiyor: ayni tarih
+    # araligi baska bir semada sorulunca oradaki satirlar geri gelir.
+    main._scan_cache.clear()
+    # 08-09 Pazar: ankor 08-07'ye (50.0) dusmeli -> %20, 08-03'e (40.0) degil -> %50
+    out = TestClient(main.app).get(
+        "/api/funds", params={"start": "2026-08-09", "end": "2026-08-12"}).json()["funds"]
+    main.app.dependency_overrides[main.db] = _restore
+    return {f["fund_code"]: f for f in out}
+
+
 c, SCHEMA = build()
 _restore = main.app.dependency_overrides[main.db]
 R = {"start": "2026-08-01", "end": "2026-08-31"}
@@ -142,6 +168,12 @@ assert gap["DDD"]["first_date"] == "2026-08-07", gap["DDD"]  # not 2026-08-11
 assert gap["DDD"]["return_pct"] == 20.0, gap["DDD"]          # not 9.09
 # CCC has nothing before the window, so the first in-window price stays the baseline
 assert gap["CCC"]["return_pct"] == 0.0
+
+# Ankor, penceredeki en SON fiyat: baslangictan onceki birden fazla fiyat varsa
+# en eskisine baglanmak donemi uzatip getiriyi sisiriyor.
+anch = build_anchor_client()
+assert anch["EEE"]["first_date"] == "2026-08-07", anch["EEE"]   # not 2026-08-03
+assert anch["EEE"]["return_pct"] == 20.0, anch["EEE"]           # not 50.0
 
 # `codes` returns exactly the requested funds, ignoring the scan's other filters —
 # otherwise a saved fund vanishes from the watchlist whenever a filter is active.
