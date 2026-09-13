@@ -1066,14 +1066,37 @@ def list_positions(conn: Db, user: User):
     }
 
 
+# Tarayici her zaman yeniden dogrulasin (frontend duzenlemesi gorunsun), ama
+# Vercel'in edge'i dosyayi tutabilsin.
+#
+# ponytail: duz "no-cache" edge'i de kapatiyordu, yani / ve /app.js her
+# istekte Python lambda'sini uyandiriyordu -- sayfanin ILK BAYTI konteyner
+# acilisini ve ~0,6-2,4 sn'lik import'u bekliyordu. Loglarda hepsi cache=MISS.
+# s-maxage yalnizca paylasimli onbellegi ilgilendiriyor; max-age=0 +
+# must-revalidate sayesinde tarayici yine her acilista dogruluyor.
+#
+# Sure uzun olabilir cunku Vercel'de bir dagitimin dosyalari degismez ve her
+# yeni dagitim kendi bos edge onbellegiyle basliyor -- yani deploy ettiginde
+# bayat dosya servis edilmiyor.
+#
+# VERCEL kosulu sart: docker-compose static/'i read-only bind mount ediyor
+# (yeniden build gerekmesin diye), orada dosyalar sunucu calisirken
+# degisebiliyor. Onun onune bir vekil konursa s-maxage bayat dosya servis
+# ederdi; bu yuzden Docker yolunda eski davranis aynen kaliyor.
+def _static_cache_control() -> str:
+    if os.environ.get("VERCEL"):
+        return "public, max-age=0, must-revalidate, s-maxage=31536000"
+    return "no-cache"
+
+
 class RevalidatingStatic(StaticFiles):
     """Tarayici index.html/app.js'i yeniden dogrulamadan onbellekten servis edince
-    frontend duzenlemeleri gorunmuyor. 'no-cache' her istekte dogrulama zorunlu
-    kiliyor; ETag ayni kaldiginda dosya yine tekrar indirilmiyor."""
+    frontend duzenlemeleri gorunmuyor. Her istekte dogrulama zorunlu kaliyor;
+    ETag ayni kaldiginda dosya yine tekrar indirilmiyor."""
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Cache-Control"] = _static_cache_control()
         return response
 
 

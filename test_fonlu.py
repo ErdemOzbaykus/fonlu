@@ -189,6 +189,24 @@ anch = build_anchor_client()
 assert anch["EEE"]["first_date"] == "2026-08-07", anch["EEE"]   # not 2026-08-03
 assert anch["EEE"]["return_pct"] == 20.0, anch["EEE"]           # not 50.0
 
+# Statik dosyalar: tarayici her zaman yeniden dogrulamali, ama Vercel'de
+# edge onbellege alinabilmeli -- duz "no-cache" edge'i de kapatiyor ve sayfanin
+# ilk bayti her istekte lambda soguk baslangicini bekliyordu.
+assert main._static_cache_control() == "no-cache"          # Docker: yerinde degisebilir
+os.environ["VERCEL"] = "1"
+try:
+    vercel_basligi = main._static_cache_control()
+    assert "s-maxage=31536000" in vercel_basligi, vercel_basligi   # edge tutabilsin
+    assert "max-age=0" in vercel_basligi and "must-revalidate" in vercel_basligi, vercel_basligi
+    r = c.get("/app.js")
+    assert r.headers["cache-control"] == vercel_basligi, r.headers["cache-control"]
+    # ETag korunmali: tarayici dogrulasin ama bosuna indirmesin.
+    r304 = c.get("/app.js", headers={"if-none-match": r.headers["etag"]})
+    assert r304.status_code == 304, r304.status_code
+finally:
+    os.environ.pop("VERCEL")
+assert c.get("/app.js").headers["cache-control"] == "no-cache"
+
 # /api/status: TABLO HIC YOKKEN de calismali. Kod semayi goc ettirmeden once
 # deploy edilirse uc 500 dondurmemeli; bu tam olarak bir kez basimiza geldi.
 with connect_test(SCHEMA) as cn:
