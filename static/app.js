@@ -394,11 +394,20 @@ async function loadFunds({ onlyQuery = false } = {}) {
 }
 $("s-go").onclick = () => loadFunds();
 
-// Yazarken ara: her tusa istek atmamak icin 300 ms bekleyip son halini gonderir.
+// Yazarken ara: her tusa istek atmamak icin bekleyip son halini gonderir.
+// Esik SADECE yazarken gecerli: tek harf heniz yazilmayi surduren bir kelime,
+// onun icin istek atmak bosa. Enter ve Filtrele ise kullanicinin acik eylemi --
+// ikisi de yazilani oldugu gibi arar, yoksa "Filtrele'ye bastim, bir sey olmadi"
+// ya da tusla dugmenin farkli davrandigi bir arayuz cikiyor.
+// Alan tamamen bosaltilinca filtresiz listeye donmek icin istek yine gidiyor.
+const Q_MIN = 2;
+const Q_DEBOUNCE = 500;
 let qTimer;
 $("s-q").oninput = () => {
   clearTimeout(qTimer);
-  qTimer = setTimeout(() => loadFunds({ onlyQuery: true }), 300);
+  const v = $("s-q").value.trim();
+  if (v && v.length < Q_MIN) return;
+  qTimer = setTimeout(() => loadFunds({ onlyQuery: true }), Q_DEBOUNCE);
 };
 $("s-q").onkeydown = (e) => {
   if (e.key !== "Enter") return;

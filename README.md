@@ -86,6 +86,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA fonlu TO fonlu_app;
 -- positions.id bir identity sütunu; sequence yetkisi olmadan INSERT patlar.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA fonlu TO fonlu_app;
 
+-- ON ALL TABLES yalnızca o an var olan tabloları kapsar. Bundan sonra eklenen
+-- tablolar da kendiliğinden kapsansın, yoksa yeni bir tablo eklendiğinde
+-- uygulama "permission denied" alır ve sebebi kolay görünmez.
+ALTER DEFAULT PRIVILEGES IN SCHEMA fonlu
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fonlu_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA fonlu
+    GRANT USAGE, SELECT ON SEQUENCES TO fonlu_app;
+
 -- Uygulama bağlantısı search_path'i kendi ayarlamak zorunda kalmasın.
 ALTER ROLE fonlu_app SET search_path = fonlu;
 
@@ -317,6 +325,13 @@ Gereken iki dosya repoda hazır:
 Vercel → Add New → Project → bu GitHub deposunu seçin. Framework `fastapi` olarak
 algılanıyor; build ya da output ayarı girmenize gerek yok. Her `main` push'u
 kendiliğinden dağıtılır.
+
+Statik dosyalar (`index.html`, `app.js`) da bu fonksiyondan servis ediliyor, ama
+Vercel'de `s-maxage` ile edge önbelleğine alınıyorlar: yoksa sayfanın ilk baytı
+bile konteyner açılışını ve ~0,6–2,4 sn'lik Python import'unu beklerdi. Tarayıcı
+`max-age=0, must-revalidate` ile yine her açılışta doğruluyor, yani frontend
+düzenlemesi anında görünüyor; her yeni dağıtım kendi boş edge önbelleğiyle
+başladığı için bayat dosya servis edilmiyor.
 
 ### 2. Ortam değişkenleri
 
@@ -627,8 +642,9 @@ METEN yeni girmiş, BETAE çıkmış, TUPRS 5,03 → 2,79 (−2,24 puan).
 - Adlandırılmış volume yok — tüm durum Supabase'de, imaj tamamen tek kullanımlık.
   `docker compose down` veri kaybettirmez.
 - `static/` read-only bind mount edilmiş, frontend düzenlemeleri yeniden build
-  gerektirmiyor; statik dosyalar `Cache-Control: no-cache` ile servis ediliyor. Python
-  tarafını değiştirdiğinizde build gerekiyor.
+  gerektirmiyor; statik dosyalar `Cache-Control: no-cache` ile servis ediliyor —
+  dosyalar sunucu çalışırken değişebildiği için burada paylaşımlı önbellek
+  süresi **verilmiyor**. Python tarafını değiştirdiğinizde build gerekiyor.
 - Konteyner root olmayan `fonlu` kullanıcısıyla çalışıyor. İmaj ~544 MB (pandas +
   pdfplumber).
 - `restart: unless-stopped` sayesinde Docker yeniden başladığında site kendiliğinden

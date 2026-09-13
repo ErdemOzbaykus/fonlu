@@ -87,6 +87,29 @@ def store_breakdown(conn, df):
     conn.commit()
 
 
+def update_stats(conn):
+    """Rozet sayimlarini tazeler. Senkron sonunda bir kez cagriliyor.
+
+    Bu sayilar yalnizca senkron kostugunda degisiyor ama /api/status onlari her
+    istekte yeniden hesapliyordu: uretimde COUNT(DISTINCT fund_code) tek basina
+    16 sn, ucu birlikte 19,5 sn, ve acilista arayuz bunu bekliyordu.
+    Sorgular birebir ayni -- degisen tek sey ne siklikta kostuklari.
+    """
+    conn.execute(
+        """INSERT INTO cache_stats (id, price_rows, fund_count, kap_count, updated_at)
+           SELECT true,
+                  (SELECT COUNT(*) FROM prices),
+                  (SELECT COUNT(DISTINCT fund_code) FROM prices),
+                  (SELECT COUNT(*) FROM kap_disclosures),
+                  now()
+           ON CONFLICT (id) DO UPDATE SET
+               price_rows = EXCLUDED.price_rows,
+               fund_count = EXCLUDED.fund_count,
+               kap_count  = EXCLUDED.kap_count,
+               updated_at = EXCLUDED.updated_at""")
+    conn.commit()
+
+
 def sync(days=None, kinds=KINDS, conn=None, log=print):
     """Fetch TEFAS into the cache.
 

@@ -35,6 +35,20 @@ def connect_test(schema):
     return psycopg.connect(DSN, row_factory=dict_row, options=f"-c search_path={schema}")
 
 
+def _override_with_role(schema, role):
+    """Ucu belirli bir DB rolu altinda calistirir; geri alma fonksiyonu doner."""
+    onceki = main.app.dependency_overrides[main.db]
+
+    def _db():
+        with psycopg.connect(DSN, row_factory=dict_row,
+                             options=f"-c search_path={schema}") as cn:
+            cn.execute(f"SET ROLE {role}")
+            yield cn
+
+    main.app.dependency_overrides[main.db] = _db
+    return lambda: main.app.dependency_overrides.__setitem__(main.db, onceki)
+
+
 def _override(schema):
     """Gercek bagimlilik gibi generator olmali: duz lambda baglantiyi kapatmiyor."""
     pool = ConnectionPool(DSN, min_size=1, max_size=4, open=True,
@@ -108,6 +122,32 @@ def build_periods_client():
     return out
 
 
+def build_anchor_client():
+    """Donem baslangicindan ONCE birden fazla fiyati olan bir fon.
+
+    Ankor, pencere icindeki EN SON fiyat olmali (08-07), en eskisi degil (08-03).
+    Ikisini ayirt etmeyen bir sorgu donem getirisini sessizce yanlis hesaplar;
+    tek fiyatli DDD vakasi bu hatayi yakalamiyor.
+    """
+    schema = fresh_schema()
+    with connect_test(schema) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO prices (fund_code,date,kind,fund_name,price)"
+                " VALUES ('EEE',%s,'YAT','Test EEE',%s)",
+                [("2026-08-03", 40.0), ("2026-08-07", 50.0), ("2026-08-12", 60.0)])
+        conn.commit()
+    _override(schema)
+    # Tarama onbellegi surec genelinde ve anahtari semayi bilmiyor: ayni tarih
+    # araligi baska bir semada sorulunca oradaki satirlar geri gelir.
+    main._scan_cache.clear()
+    # 08-09 Pazar: ankor 08-07'ye (50.0) dusmeli -> %20, 08-03'e (40.0) degil -> %50
+    out = TestClient(main.app).get(
+        "/api/funds", params={"start": "2026-08-09", "end": "2026-08-12"}).json()["funds"]
+    main.app.dependency_overrides[main.db] = _restore
+    return {f["fund_code"]: f for f in out}
+
+
 c, SCHEMA = build()
 _restore = main.app.dependency_overrides[main.db]
 R = {"start": "2026-08-01", "end": "2026-08-31"}
@@ -142,6 +182,97 @@ assert gap["DDD"]["first_date"] == "2026-08-07", gap["DDD"]  # not 2026-08-11
 assert gap["DDD"]["return_pct"] == 20.0, gap["DDD"]          # not 9.09
 # CCC has nothing before the window, so the first in-window price stays the baseline
 assert gap["CCC"]["return_pct"] == 0.0
+
+# Ankor, penceredeki en SON fiyat: baslangictan onceki birden fazla fiyat varsa
+# en eskisine baglanmak donemi uzatip getiriyi sisiriyor.
+anch = build_anchor_client()
+assert anch["EEE"]["first_date"] == "2026-08-07", anch["EEE"]   # not 2026-08-03
+assert anch["EEE"]["return_pct"] == 20.0, anch["EEE"]           # not 50.0
+
+# Statik dosyalar: tarayici her zaman yeniden dogrulamali, ama Vercel'de
+# edge onbellege alinabilmeli -- duz "no-cache" edge'i de kapatiyor ve sayfanin
+# ilk bayti her istekte lambda soguk baslangicini bekliyordu.
+assert main._static_cache_control() == "no-cache"          # Docker: yerinde degisebilir
+os.environ["VERCEL"] = "1"
+try:
+    vercel_basligi = main._static_cache_control()
+    assert "s-maxage=31536000" in vercel_basligi, vercel_basligi   # edge tutabilsin
+    assert "max-age=0" in vercel_basligi and "must-revalidate" in vercel_basligi, vercel_basligi
+    r = c.get("/app.js")
+    assert r.headers["cache-control"] == vercel_basligi, r.headers["cache-control"]
+    # ETag korunmali: tarayici dogrulasin ama bosuna indirmesin.
+    r304 = c.get("/app.js", headers={"if-none-match": r.headers["etag"]})
+    assert r304.status_code == 304, r304.status_code
+finally:
+    os.environ.pop("VERCEL")
+assert c.get("/app.js").headers["cache-control"] == "no-cache"
+
+# /api/status: TABLO HIC YOKKEN de calismali. Kod semayi goc ettirmeden once
+# deploy edilirse uc 500 dondurmemeli; bu tam olarak bir kez basimiza geldi.
+with connect_test(SCHEMA) as cn:
+    cn.execute("ALTER TABLE cache_stats RENAME TO cache_stats_gizli")
+    cn.commit()
+tablosuz = c.get("/api/status")
+assert tablosuz.status_code == 200, tablosuz.text
+assert tablosuz.json()["funds"] == 4 and tablosuz.json()["last_date"] == "2026-08-12", tablosuz.json()
+with connect_test(SCHEMA) as cn:
+    cn.execute("ALTER TABLE cache_stats_gizli RENAME TO cache_stats")
+    cn.commit()
+
+# Tablo VAR ama role yetki verilmemisse de calismali. Kurulumdaki
+# GRANT ... ON ALL TABLES yalnizca o an var olan tablolari kapsiyor, yani
+# sonradan eklenen bir tablo kolayca yetkisiz kalabiliyor.
+ROL = "r" + SCHEMA[1:]          # kosuma ozel: yarim kalmis bir kosumla cakismasin
+with connect_test(SCHEMA) as cn:
+    cn.execute(f"CREATE ROLE {ROL} NOLOGIN")
+    cn.execute(f'GRANT USAGE ON SCHEMA "{SCHEMA}" TO {ROL}')
+    cn.execute(f'GRANT SELECT ON "{SCHEMA}".prices TO {ROL}')
+    cn.execute(f'GRANT SELECT ON "{SCHEMA}".kap_disclosures TO {ROL}')
+    cn.commit()
+    cn.execute(f"SET ROLE {ROL}")
+    try:
+        cn.execute("SELECT 1 FROM cache_stats")
+        raise AssertionError("yetki hala var, test anlamsiz")
+    except psycopg.errors.InsufficientPrivilege:
+        pass
+    cn.rollback()
+    cn.execute("RESET ROLE")
+    cn.commit()
+
+_yetkisiz = _override_with_role(SCHEMA, ROL)
+yetkisiz = c.get("/api/status")
+assert yetkisiz.status_code == 200, yetkisiz.text
+assert yetkisiz.json()["funds"] == 4, yetkisiz.json()
+_yetkisiz()
+with connect_test(SCHEMA) as cn:
+    # DROP ROLE, role bagli yetkiler dururken reddediliyor.
+    cn.execute(f"DROP OWNED BY {ROL}")
+    cn.execute(f"DROP ROLE {ROL}")
+    cn.commit()
+
+# Sayimlar senkron sonunda yazilan cache_stats'ten geliyor, ama o satir
+# yokken (ilk senkrondan once) canli hesaplanmali -- ayni sonucla.
+canli = c.get("/api/status").json()
+assert canli["funds"] == 4 and canli["last_date"] == "2026-08-12", canli
+assert canli["rows"] == len(PRICES) and canli["kap"] == 1, canli
+
+with connect_test(SCHEMA) as cn:
+    store.update_stats(cn)
+hazir = c.get("/api/status").json()
+assert (hazir["rows"], hazir["funds"], hazir["kap"]) == (canli["rows"], canli["funds"], canli["kap"]), hazir
+assert hazir["last_date"] == canli["last_date"], hazir
+
+# last_date bilerek cache_stats'te tutulmuyor: yeni bir fiyat gunu, sayimlar
+# tazelenmemis olsa bile hemen gorunmeli (arayuz donem alanlarini buna kuruyor).
+with connect_test(SCHEMA) as cn:
+    cn.execute("INSERT INTO prices (fund_code,date,kind,fund_name,price)"
+               " VALUES ('AAA','2026-08-13','YAT','Test AAA',25.0)")
+    cn.commit()
+assert c.get("/api/status").json()["last_date"] == "2026-08-13"
+with connect_test(SCHEMA) as cn:   # fixture'i geri al
+    cn.execute("DELETE FROM prices WHERE fund_code='AAA' AND date='2026-08-13'")
+    cn.commit()
+main._scan_cache.clear()
 
 # `codes` returns exactly the requested funds, ignoring the scan's other filters —
 # otherwise a saved fund vanishes from the watchlist whenever a filter is active.

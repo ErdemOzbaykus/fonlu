@@ -2,11 +2,13 @@
 talks to TEFAS, and it does so in the background."""
 
 import calendar
+import json
 import logging
 import os
 import re
 import secrets
 import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -83,6 +85,9 @@ def _run_sync(days=None, kap_only=False) -> bool:
         # ayiklanmis fonlarin kalemleri el degmeden guncellensin.
         with store.get_pool().connection() as conn:
             refresh_holdings(conn, log=log)
+            # Rozet sayimlari yalnizca burada degisiyor; /api/status onlari
+            # hazir okusun diye bir kez hesaplanip yaziliyor.
+            store.update_stats(conn)
     except Exception:
         # Ham istisna metni DATABASE_URL'i (dolayisiyla parolayi) icerebiliyor;
         # ayrinti loglarda kalsin, istemciye sabit mesaj gitsin.
@@ -164,15 +169,46 @@ def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
     return start, end
 
 
+# Sayimlarin ilk senkrondan once (bos cache_stats) hesaplandigi yol. Uretimde
+# 19,5 sn suruyor, bu yuzden yalnizca yedek: normalde store.update_stats'in
+# senkron sonunda yazdigi satir okunuyor.
+_SAYIM_CANLI = """SELECT (SELECT COUNT(*) FROM prices) AS rows,
+                         (SELECT COUNT(DISTINCT fund_code) FROM prices) AS funds,
+                         (SELECT COUNT(*) FROM kap_disclosures) AS kap"""
+
+
 @app.get("/api/status")
 def status(conn: Db, user: User):
-    # Dort ayri sorgu dort gidis-donus demekti; sayimlar tek turda gelsin.
-    row = conn.execute(
-        """SELECT (SELECT COUNT(*) FROM prices) AS rows,
-                  (SELECT COUNT(DISTINCT fund_code) FROM prices) AS funds,
-                  (SELECT COUNT(*) FROM kap_disclosures) AS kap,
-                  (SELECT MAX(date) FROM prices) AS last_date"""
-    ).fetchone()
+    """Onbellek durumu, son veri tarihi, calisan guncelleme.
+
+    ponytail: sayimlar her istekte hesaplaniyordu -- uretimde 19,5 sn
+    (COUNT(DISTINCT fund_code) tek basina 16 sn) ve acilista arayuz bunu
+    bekliyordu. Ayni sorgular artik senkron sonunda bir kez kosuyor
+    (store.update_stats), burada tek satir okunuyor. Sayilar degismedi.
+
+    last_date bilerek canli kaliyor: arayuz donem alanlarini ona gore kuruyor,
+    bayat bir deger orada gercek bir hataya donusur. Index'ten 3 ms'de geliyor.
+    """
+    try:
+        row = conn.execute(
+            """SELECT (SELECT MAX(date) FROM prices) AS last_date,
+                      s.price_rows AS rows, s.fund_count AS funds, s.kap_count AS kap
+               FROM (SELECT 1) _ LEFT JOIN cache_stats s ON true"""
+        ).fetchone()
+    except (psycopg.errors.UndefinedTable, psycopg.errors.InsufficientPrivilege):
+        # Tablo henuz yok (kod migration'dan once deploy edildi) ya da var ama
+        # role yetki verilmemis. Ikincisi kurulumda kolay kaciriliyor: kurulum
+        # GRANT ... ON ALL TABLES kullaniyor, bu yalnizca o an var olan
+        # tablolari kapsiyor ve semada varsayilan yetki tanimli degil.
+        # Iki durumda da uc calismaya devam etsin; bir dagitimin eksik bir
+        # migration ya da GRANT yuzunden 500 dondurmesi kabul edilemez.
+        # Hata islemi iptal ediyor, once rollback.
+        conn.rollback()
+        row = None
+    if row is None or row["rows"] is None:
+        # cache_stats yok ya da ilk senkron henuz kosmadi: eski canli yol.
+        row = {**conn.execute("SELECT MAX(date) AS last_date FROM prices").fetchone(),
+               **conn.execute(_SAYIM_CANLI).fetchone()}
     return {**row, "refresh": refresh_state}
 
 
@@ -211,74 +247,137 @@ def cron_sync(request: Request, kap_only: bool = False,
     return {"error": refresh_state["error"], "log": refresh_state["log"]}
 
 
-# ponytail: surec ici onbellek, dolu olunca komple bosalir -- LRU degil, ama
-# anahtar zaten avuc dolusu (donem x tur x arama). lru_cache kullanilamadi:
-# `conn` anahtara girer, her istek yeni baglantiyla gelince onbellek ise yaramazdi.
-# Girdi basina ~5 MB; dar bellekte _SCAN_MAX'i dusur.
+# ponytail: surec ici onbellek. Anahtar (stamp, start, end, wanted) -- `kind` ve
+# `q` bilerek disarida, gerekcesi _scan'de; yani ayni donemin taramasini tur ve
+# arama ne olursa olsun tek girdi karsiliyor. Tavana varinca komple bosaltmak
+# donem dugmeleri arasinda gezinirken her seferinde soguk sorguya dusuruyordu;
+# OrderedDict ile en eski girdi atiliyor, gerisi kaliyor.
+# lru_cache kullanilamadi: `conn` anahtara girer, her istek yeni baglantiyla
+# gelince onbellek ise yaramazdi. Girdi basina ~5 MB; dar bellekte _SCAN_MAX'i dusur.
 _SCAN_MAX = 8
-_scan_cache: dict = {}
+_scan_cache: "OrderedDict[tuple, list]" = OrderedDict()
+# Senkron (`def`) uc noktalar Starlette'in is parcacigi havuzunda kosuyor, yani
+# bu sozluge ayni anda birden fazla istek dokunuyor. "Iceride mi -> oku" ve
+# "dolu mu -> at -> yaz" adimlari bolunebilir: arada baska bir istek tahliye
+# ederse KeyError, yani 500. Kilit yalnizca sozluk islemlerini sariyor, sorguyu
+# degil; ayni anahtari iki istek birden hesaplarsa yalnizca is tekrarlanir.
+_scan_lock = threading.Lock()
 
 
-def _scan(conn, stamp: date, start: str, end: str, kind: Optional[str], q: Optional[str],
+def _scan(conn, stamp: date, start: str, end: str,
           wanted: Optional[tuple[str, ...]]):
-    """Tarama sorgusunun ham satirlari + donem oncesi ankor fiyatlari.
+    """Tarama sorgusunun satirlari: fon basina son fiyat, onceki gun ve donem ankoru.
 
     Fiyatlar gunde bir kez /api/refresh ile degisiyor; anahtardaki `stamp`
     (onbellegin son fiyat gunu) degisince girdiler kendiliginden gecersiz kalir.
     Doner degerler okunur kabul edilir: cagiran her fon icin yeni sozluk kuruyor.
+
+    ponytail: bu sorgu once fon basina TEK satir birakmak icin araliktaki tum
+    fiyat satirlarini pencere fonksiyonuyla siraliyordu -- 1 yillik donemde 625k
+    satiri sirala, 2.500'e in. LATERAL ile fon basina PRIMARY KEY (fund_code, date)
+    uzerinden birkac index okumasina indi (1 yil 2.3 sn -> 0.24 sn, tum gecmis
+    8.2 sn -> 0.44 sn). Ayni degisiklik list_positions'ta da yapilmisti.
+
+    ponytail: `points` fon basina ayri bir COUNT lateral'i ve tum gecmiste ~55 ms,
+    1 yilda ~15 ms tutuyor. Arayuz okumuyor ama yanit semasinin parcasi oldugu
+    icin duruyor: sessizce alan dusurmek API tuketicisini bozar.
+
+    ponytail: `kind` ve `q` bilerek SQL'de degil, cagiranda suzuluyor. Ikisi de
+    fon duzeyinde nitelik ve UPPER(fund_name) LIKE '%...%' hicbir index
+    kullanamiyor; her lateral'de tekrarlaninca arama 1.7 sn'den 2.8 sn'ye
+    cikmisti. Disarida kalinca anahtardan da dustuler: her arama ayni onbellek
+    girdisini kullaniyor, yani ikinci harften sonrasi sorgusuz geliyor.
+    `wanted` SQL'de kaliyor -- o indexli ve havuzu gercekten daraltiyor.
     """
-    key = (stamp, start, end, kind, q, wanted)
-    if key in _scan_cache:
-        return _scan_cache[key]
+    key = (stamp, start, end, wanted)
+    with _scan_lock:
+        cached = _scan_cache.get(key)
+        if cached is not None:
+            _scan_cache.move_to_end(key)
+            return cached
 
     code_filter = (" AND fund_code IN (%s)" % ",".join(["%s"] * len(wanted))) if wanted else ""
     rows = conn.execute(
         """
-        SELECT p.fund_code, p.kind, p.fund_name, p.last_price, p.first_price,
-               p.prev_price, p.portfolio_size, p.investor_count, p.first_date,
-               p.last_date, p.points, b.allocation
-        FROM (
-            SELECT fund_code, kind, fund_name, portfolio_size, investor_count,
-                   price AS last_price, date AS last_date,
-                   FIRST_VALUE(price) OVER w AS first_price,
-                   FIRST_VALUE(date)  OVER w AS first_date,
-                   -- Gunluk getiri icin bir onceki islem gununun fiyati. LAG cerceve
-                   -- (ROWS BETWEEN ...) tanimini yok sayar, w'nin siralamasini kullanir.
-                   LAG(price) OVER w AS prev_price,
-                   COUNT(*) OVER (PARTITION BY fund_code) AS points,
-                   ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) AS rn
+        WITH codes AS (
+            -- Havuz donemin TAMAMINDAN cikiyor: son birkac gunle sinirlansaydi
+            -- fiyat aciklamayi birakmis (kapanmis) fonlar 1Y listesinden duserdi.
+            SELECT DISTINCT fund_code FROM prices
+            WHERE date BETWEEN %s AND %s""" + code_filter + """
+        )
+        SELECT c.fund_code, son.kind, son.fund_name, son.portfolio_size, son.investor_count,
+               son.price AS last_price, son.date AS last_date, onceki.price AS prev_price,
+               adet.points,
+               -- Donem getirisi, aralik ICINDEKI ilk fiyattan degil, baslangictan
+               -- onceki son fiyattan hesaplanmali: 17 Mayis Pazar ise TEFAS 15 Mayis
+               -- kapanisini esas alir, aralik icindeki ilk fiyati (18 Mayis) almak
+               -- donemi kisaltip getiriyi bozuyor. Tatil bosluklari icin 15 gun yetiyor.
+               -- Ankor yoksa (yeni ihrac) aralik ici ilk fiyat kaliyor.
+               COALESCE(ankor.price, ilk.price) AS first_price,
+               COALESCE(ankor.date, ilk.date) AS first_date,
+               b.allocation
+        FROM codes c
+        CROSS JOIN LATERAL (
+            SELECT kind, fund_name, portfolio_size, investor_count, price, date
             FROM prices
-            WHERE date BETWEEN %s AND %s
-              -- ::text sart: Postgres ciplak bir parametrenin tipini IS NULL
-              -- icinde cikaramiyor, "could not determine data type" diyor.
-              AND (%s::text IS NULL OR kind = %s)
-              AND (%s::text IS NULL OR fund_code LIKE %s OR UPPER(fund_name) LIKE %s)
-              """ + code_filter + """
-            WINDOW w AS (PARTITION BY fund_code ORDER BY date
-                         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-        ) p
-        LEFT JOIN breakdown b ON b.fund_code = p.fund_code
-        WHERE p.rn = 1
+            WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
+            ORDER BY date DESC LIMIT 1
+        ) son
+        -- Gunluk getiri icin bir onceki islem gununun fiyati; aralikta tek fiyat
+        -- varsa NULL kalir ve arayuz "—" basar.
+        LEFT JOIN LATERAL (
+            SELECT price FROM prices
+            WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
+            ORDER BY date DESC OFFSET 1 LIMIT 1
+        ) onceki ON true
+        CROSS JOIN LATERAL (
+            SELECT price, date FROM prices
+            WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
+            ORDER BY date LIMIT 1
+        ) ilk
+        -- Arayuz okumuyor ama yanit semasinin bir parcasi; API tuketicisinin
+        -- serinin kac gunluk oldugunu gorebilmesi icin duruyor.
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS points FROM prices
+            WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
+        ) adet
+        LEFT JOIN LATERAL (
+            SELECT price, date FROM prices
+            WHERE fund_code = c.fund_code AND date BETWEEN %s::date - 15 AND %s
+            ORDER BY date DESC LIMIT 1
+        ) ankor ON true
+        LEFT JOIN breakdown b ON b.fund_code = c.fund_code
         """,
-        (start, end, kind, kind, q, f"%{(q or '').upper()}%", f"%{(q or '').upper()}%",
-         *(wanted or [])),
+        (start, end, *(wanted or []), start, end, start, end, start, end, start, end, start, start),
     ).fetchall()
 
-    # Donem getirisi, aralik ICINDEKI ilk fiyattan degil, baslangictan onceki son
-    # fiyattan hesaplanmali: 17 Mayis Pazar ise TEFAS 15 Mayis kapanisini esas alir,
-    # aralik icindeki ilk fiyati (18 Mayis) almak donemi kisaltip getiriyi bozuyor.
-    # Tatil bosluklari icin 15 gunluk pencere yetiyor.
-    base = {r["fund_code"]: r for r in conn.execute(
-        """SELECT fund_code, price, date FROM (
-             SELECT fund_code, price, date,
-                    ROW_NUMBER() OVER (PARTITION BY fund_code ORDER BY date DESC) rn
-             FROM prices WHERE date BETWEEN %s::date - 15 AND %s) t
-           WHERE rn = 1""", (start, start))}
+    with _scan_lock:
+        # Tavan kontrolu ile yazim arasi bolunmesin: iki istek birden yazarsa
+        # sozluk _SCAN_MAX'i asabilirdi.
+        while len(_scan_cache) >= _SCAN_MAX:
+            _scan_cache.popitem(last=False)
+        _scan_cache[key] = rows
+    return rows
 
-    if len(_scan_cache) >= _SCAN_MAX:
-        _scan_cache.clear()
-    _scan_cache[key] = (rows, base)
-    return rows, base
+
+def _iso(value):
+    """json.dumps'in cozemedigi tek tip `date`; ISO metne ceviriyoruz."""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"JSON'a cevrilemeyen tip: {type(value).__name__}")
+
+
+def _json(payload) -> Response:
+    """Yaniti dogrudan kodlar.
+
+    ponytail: FastAPI'nin varsayilan yolu sozlukleri once jsonable_encoder ile
+    tek tek dolasiyor; 2.500 fonluk taramada bu tek basina ~185 ms (kodlama 95 ms,
+    render 91 ms) ve tarama onbellekten gelse bile her istekte odeniyordu.
+    json.dumps ayni cikti icin ~16 ms. separators: JSONResponse ile ayni sikilik.
+    allow_nan varsayilanda birakildi -- bilerek: davranisi degistirmesin.
+    """
+    return Response(json.dumps(payload, separators=(",", ":"), default=_iso),
+                    media_type="application/json")
 
 
 @app.get("/api/funds")
@@ -311,16 +410,20 @@ def list_funds(
         # "Tam olarak bu fonlar" demek; arama/tip filtreleri de gecersiz kalmali,
         # yoksa istenen kod SQL tarafinda elenip sessizce bos donuyor.
         kind = q = None
-    rows, base = _scan(conn, store.last_cached_date(conn), start, end, kind, q,
-                       tuple(wanted) if wanted else None)
+    rows = _scan(conn, store.last_cached_date(conn), start, end,
+                 tuple(wanted) if wanted else None)
+    # `kind` ve `q` artik burada suzuluyor (gerekcesi _scan'de). LIKE '%..%' ile
+    # ayni is: kod ya da unvan icinde gecsin. Kodlar zaten buyuk harf.
+    needle = (q or "").upper()
 
     out = []
     for r in rows:
-        # Fonun aralik oncesi fiyati yoksa (yeni ihrac) aralik ici ilk fiyat kalir.
-        anchor = base.get(r["fund_code"])
-        first_price = anchor["price"] if anchor else r["first_price"]
-        first_date = anchor["date"] if anchor else r["first_date"]
-        ret = _pct(first_price, r["last_price"])
+        if kind and r["kind"] != kind:
+            continue
+        if needle and needle not in r["fund_code"] and needle not in (r["fund_name"] or "").upper():
+            continue
+        # first_price artik sorguda cozuluyor: donem ankoru, yoksa aralik ici ilk fiyat.
+        ret = _pct(r["first_price"], r["last_price"])
         # allocation jsonb: psycopg zaten dict olarak veriyor, json.loads gerekmiyor.
         groups = _groups(r["allocation"] or {})
         cat = _category(groups)
@@ -339,14 +442,14 @@ def list_funds(
             if fon_turu and fon_turu not in (FON_TURU.get(t) for t in unv):
                 continue
         fund = {k: r[k] for k in r.keys() if k != "allocation"}
-        out.append({**fund, "first_price": first_price, "first_date": first_date,
+        out.append({**fund,
                     "return_pct": ret, "category": cat, "unvan": ", ".join(unv), "groups": groups,
                     # Aralikta tek fiyat varsa onceki gun yok; None kalir, arayuz "—" basar.
                     "daily_pct": _pct(r["prev_price"], r["last_price"])})
     out.sort(key=lambda f: (f["return_pct"] is None, -(f["return_pct"] or 0)))
-    return {"start": start, "end": end, "count": len(out),
-            "categories": CATEGORIES + ["Karma"], "unvanlar": UNVANLAR,
-            "turler": TURLER, "funds": out[:limit]}
+    return _json({"start": start, "end": end, "count": len(out),
+                  "categories": CATEGORIES + ["Karma"], "unvanlar": UNVANLAR,
+                  "turler": TURLER, "funds": out[:limit]})
 
 
 def _pct(first, last):
@@ -963,14 +1066,37 @@ def list_positions(conn: Db, user: User):
     }
 
 
+# Tarayici her zaman yeniden dogrulasin (frontend duzenlemesi gorunsun), ama
+# Vercel'in edge'i dosyayi tutabilsin.
+#
+# ponytail: duz "no-cache" edge'i de kapatiyordu, yani / ve /app.js her
+# istekte Python lambda'sini uyandiriyordu -- sayfanin ILK BAYTI konteyner
+# acilisini ve ~0,6-2,4 sn'lik import'u bekliyordu. Loglarda hepsi cache=MISS.
+# s-maxage yalnizca paylasimli onbellegi ilgilendiriyor; max-age=0 +
+# must-revalidate sayesinde tarayici yine her acilista dogruluyor.
+#
+# Sure uzun olabilir cunku Vercel'de bir dagitimin dosyalari degismez ve her
+# yeni dagitim kendi bos edge onbellegiyle basliyor -- yani deploy ettiginde
+# bayat dosya servis edilmiyor.
+#
+# VERCEL kosulu sart: docker-compose static/'i read-only bind mount ediyor
+# (yeniden build gerekmesin diye), orada dosyalar sunucu calisirken
+# degisebiliyor. Onun onune bir vekil konursa s-maxage bayat dosya servis
+# ederdi; bu yuzden Docker yolunda eski davranis aynen kaliyor.
+def _static_cache_control() -> str:
+    if os.environ.get("VERCEL"):
+        return "public, max-age=0, must-revalidate, s-maxage=31536000"
+    return "no-cache"
+
+
 class RevalidatingStatic(StaticFiles):
     """Tarayici index.html/app.js'i yeniden dogrulamadan onbellekten servis edince
-    frontend duzenlemeleri gorunmuyor. 'no-cache' her istekte dogrulama zorunlu
-    kiliyor; ETag ayni kaldiginda dosya yine tekrar indirilmiyor."""
+    frontend duzenlemeleri gorunmuyor. Her istekte dogrulama zorunlu kaliyor;
+    ETag ayni kaldiginda dosya yine tekrar indirilmiyor."""
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Cache-Control"] = _static_cache_control()
         return response
 
 
