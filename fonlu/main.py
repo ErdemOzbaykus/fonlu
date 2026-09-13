@@ -85,6 +85,9 @@ def _run_sync(days=None, kap_only=False) -> bool:
         # ayiklanmis fonlarin kalemleri el degmeden guncellensin.
         with store.get_pool().connection() as conn:
             refresh_holdings(conn, log=log)
+            # Rozet sayimlari yalnizca burada degisiyor; /api/status onlari
+            # hazir okusun diye bir kez hesaplanip yaziliyor.
+            store.update_stats(conn)
     except Exception:
         # Ham istisna metni DATABASE_URL'i (dolayisiyla parolayi) icerebiliyor;
         # ayrinti loglarda kalsin, istemciye sabit mesaj gitsin.
@@ -166,15 +169,33 @@ def _range(start: Optional[str], end: Optional[str]) -> tuple[str, str]:
     return start, end
 
 
+# Sayimlarin ilk senkrondan once (bos cache_stats) hesaplandigi yol. Uretimde
+# 19,5 sn suruyor, bu yuzden yalnizca yedek: normalde store.update_stats'in
+# senkron sonunda yazdigi satir okunuyor.
+_SAYIM_CANLI = """SELECT (SELECT COUNT(*) FROM prices) AS rows,
+                         (SELECT COUNT(DISTINCT fund_code) FROM prices) AS funds,
+                         (SELECT COUNT(*) FROM kap_disclosures) AS kap"""
+
+
 @app.get("/api/status")
 def status(conn: Db, user: User):
-    # Dort ayri sorgu dort gidis-donus demekti; sayimlar tek turda gelsin.
+    """Onbellek durumu, son veri tarihi, calisan guncelleme.
+
+    ponytail: sayimlar her istekte hesaplaniyordu -- uretimde 19,5 sn
+    (COUNT(DISTINCT fund_code) tek basina 16 sn) ve acilista arayuz bunu
+    bekliyordu. Ayni sorgular artik senkron sonunda bir kez kosuyor
+    (store.update_stats), burada tek satir okunuyor. Sayilar degismedi.
+
+    last_date bilerek canli kaliyor: arayuz donem alanlarini ona gore kuruyor,
+    bayat bir deger orada gercek bir hataya donusur. Index'ten 3 ms'de geliyor.
+    """
     row = conn.execute(
-        """SELECT (SELECT COUNT(*) FROM prices) AS rows,
-                  (SELECT COUNT(DISTINCT fund_code) FROM prices) AS funds,
-                  (SELECT COUNT(*) FROM kap_disclosures) AS kap,
-                  (SELECT MAX(date) FROM prices) AS last_date"""
+        """SELECT (SELECT MAX(date) FROM prices) AS last_date,
+                  s.price_rows AS rows, s.fund_count AS funds, s.kap_count AS kap
+           FROM (SELECT 1) _ LEFT JOIN cache_stats s ON true"""
     ).fetchone()
+    if row["rows"] is None:      # ilk senkrondan once: bir kez canli hesapla
+        row = {**row, **conn.execute(_SAYIM_CANLI).fetchone()}
     return {**row, "refresh": refresh_state}
 
 

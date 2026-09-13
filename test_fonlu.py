@@ -175,6 +175,30 @@ anch = build_anchor_client()
 assert anch["EEE"]["first_date"] == "2026-08-07", anch["EEE"]   # not 2026-08-03
 assert anch["EEE"]["return_pct"] == 20.0, anch["EEE"]           # not 50.0
 
+# /api/status: sayimlar senkron sonunda yazilan cache_stats'ten geliyor, ama o
+# satir yokken (ilk senkrondan once) canli hesaplanmali -- ayni sonucla.
+canli = c.get("/api/status").json()
+assert canli["funds"] == 4 and canli["last_date"] == "2026-08-12", canli
+assert canli["rows"] == len(PRICES) and canli["kap"] == 1, canli
+
+with connect_test(SCHEMA) as cn:
+    store.update_stats(cn)
+hazir = c.get("/api/status").json()
+assert (hazir["rows"], hazir["funds"], hazir["kap"]) == (canli["rows"], canli["funds"], canli["kap"]), hazir
+assert hazir["last_date"] == canli["last_date"], hazir
+
+# last_date bilerek cache_stats'te tutulmuyor: yeni bir fiyat gunu, sayimlar
+# tazelenmemis olsa bile hemen gorunmeli (arayuz donem alanlarini buna kuruyor).
+with connect_test(SCHEMA) as cn:
+    cn.execute("INSERT INTO prices (fund_code,date,kind,fund_name,price)"
+               " VALUES ('AAA','2026-08-13','YAT','Test AAA',25.0)")
+    cn.commit()
+assert c.get("/api/status").json()["last_date"] == "2026-08-13"
+with connect_test(SCHEMA) as cn:   # fixture'i geri al
+    cn.execute("DELETE FROM prices WHERE fund_code='AAA' AND date='2026-08-13'")
+    cn.commit()
+main._scan_cache.clear()
+
 # `codes` returns exactly the requested funds, ignoring the scan's other filters —
 # otherwise a saved fund vanishes from the watchlist whenever a filter is active.
 saved = c.get("/api/funds", params={**R, "codes": "bbb,aaa", "min_return": 500,

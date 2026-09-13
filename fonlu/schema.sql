@@ -50,6 +50,21 @@ CREATE TABLE holdings (
     PRIMARY KEY (fund_code, report_date, section, code)
 );
 
+-- Rozetteki sayimlar. Gunde bir kez, senkron sonunda yazilir: COUNT(DISTINCT
+-- fund_code) uretimde 16 saniye suruyor ve bu sayilar yalnizca senkron
+-- kostugunda degisiyor, yani her istekte hesaplamak saf israf.
+-- Tek satir: id her zaman true, CHECK ikinci satiri engelliyor.
+-- last_date bilerek burada YOK: onu arayuz donem alanlarini kurmak icin
+-- kullaniyor, bayat bir deger orada gercek bir hataya donusur. MAX(date)
+-- zaten index'ten 3 ms'de geliyor.
+CREATE TABLE cache_stats (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    price_rows bigint NOT NULL,
+    fund_count integer NOT NULL,
+    kap_count bigint NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE watchlist (
     user_id uuid NOT NULL,
     fund_code text NOT NULL,
