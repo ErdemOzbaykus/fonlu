@@ -236,6 +236,10 @@ def _scan(conn, stamp: date, start: str, end: str,
     uzerinden birkac index okumasina indi (1 yil 2.3 sn -> 0.24 sn, tum gecmis
     8.2 sn -> 0.44 sn). Ayni degisiklik list_positions'ta da yapilmisti.
 
+    ponytail: `points` fon basina ayri bir COUNT lateral'i ve tum gecmiste ~55 ms,
+    1 yilda ~15 ms tutuyor. Arayuz okumuyor ama yanit semasinin parcasi oldugu
+    icin duruyor: sessizce alan dusurmek API tuketicisini bozar.
+
     ponytail: `kind` ve `q` bilerek SQL'de degil, cagiranda suzuluyor. Ikisi de
     fon duzeyinde nitelik ve UPPER(fund_name) LIKE '%...%' hicbir index
     kullanamiyor; her lateral'de tekrarlaninca arama 1.7 sn'den 2.8 sn'ye
@@ -259,6 +263,7 @@ def _scan(conn, stamp: date, start: str, end: str,
         )
         SELECT c.fund_code, son.kind, son.fund_name, son.portfolio_size, son.investor_count,
                son.price AS last_price, son.date AS last_date, onceki.price AS prev_price,
+               adet.points,
                -- Donem getirisi, aralik ICINDEKI ilk fiyattan degil, baslangictan
                -- onceki son fiyattan hesaplanmali: 17 Mayis Pazar ise TEFAS 15 Mayis
                -- kapanisini esas alir, aralik icindeki ilk fiyati (18 Mayis) almak
@@ -286,6 +291,12 @@ def _scan(conn, stamp: date, start: str, end: str,
             WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
             ORDER BY date LIMIT 1
         ) ilk
+        -- Arayuz okumuyor ama yanit semasinin bir parcasi; API tuketicisinin
+        -- serinin kac gunluk oldugunu gorebilmesi icin duruyor.
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS points FROM prices
+            WHERE fund_code = c.fund_code AND date BETWEEN %s AND %s
+        ) adet
         LEFT JOIN LATERAL (
             SELECT price, date FROM prices
             WHERE fund_code = c.fund_code AND date BETWEEN %s::date - 15 AND %s
@@ -293,7 +304,7 @@ def _scan(conn, stamp: date, start: str, end: str,
         ) ankor ON true
         LEFT JOIN breakdown b ON b.fund_code = c.fund_code
         """,
-        (start, end, *(wanted or []), start, end, start, end, start, end, start, start),
+        (start, end, *(wanted or []), start, end, start, end, start, end, start, end, start, start),
     ).fetchall()
 
     if len(_scan_cache) >= _SCAN_MAX:
@@ -383,7 +394,7 @@ def list_funds(
                 continue
             if fon_turu and fon_turu not in (FON_TURU.get(t) for t in unv):
                 continue
-        fund = {k: r[k] for k in r.keys() if k not in ("allocation", "first_price")}
+        fund = {k: r[k] for k in r.keys() if k != "allocation"}
         out.append({**fund,
                     "return_pct": ret, "category": cat, "unvan": ", ".join(unv), "groups": groups,
                     # Aralikta tek fiyat varsa onceki gun yok; None kalir, arayuz "—" basar.
