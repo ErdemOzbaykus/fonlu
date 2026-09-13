@@ -109,6 +109,9 @@ def build_periods_client():
             rows.append(("PPP", day.isoformat(), price))
             price *= 1.001
         day += timedelta(days=1)
+    # Son gun fiyatsiz satir (store eksik degeri NULL yaziyor): detay onu son
+    # fiyat sayinca donemler null cikiyor, karsilastirma ise atliyordu.
+    rows.append(("PPP", "2026-08-17", None))
     with connect_test(schema) as conn:
         with conn.cursor() as cur:
             cur.executemany(
@@ -332,6 +335,9 @@ assert per["6A"] is None and per["1Y"] is None, per  # genuinely not seeded
 # Karsilastirma ayni ankoru kullanmali: donem getirileri detaydakiyle birebir.
 cp = pcmp["funds"][0]["periods"]
 assert {k: v and v["return_pct"] for k, v in cp.items()} == per, cp
+# Onbellek 1 yili karsilamiyor: grafik ilk fiyattan basliyor ve 1Y null kaliyor;
+# arayuz "1 yillik veri yok" notunu buradan cikariyor.
+assert cp["1Y"] is None and pcmp["funds"][0]["series"][0]["date"] == "2026-05-18", pcmp
 
 # Kiyas kalemleri: akis = pay degisimi x o gunun fiyati (pay sayisi eksik gun
 # atlanir), yuzdesi donem basi buyukluge gore.

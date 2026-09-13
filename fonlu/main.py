@@ -627,16 +627,19 @@ def fund_detail(code: str, conn: Db, user: User,
                 start: Optional[str] = None, end: Optional[str] = None):
     code = code.upper()
     start, end = _range(start, end)
+    # Fiyatsiz satir (store eksik degeri NULL yaziyor) islem gunu degil; uc
+    # sorgu da /api/compare gibi eliyor, yoksa son gundeki NULL donem
+    # getirilerini null yapip iki ekrani birbirinden ayiriyordu.
     series = conn.execute(
         "SELECT date, price, shares_outstanding FROM prices"
-        " WHERE fund_code = %s AND date BETWEEN %s AND %s ORDER BY date",
+        " WHERE fund_code = %s AND date BETWEEN %s AND %s AND price > 0 ORDER BY date",
         (code, start, end),
     ).fetchall()
     if not series:
         raise HTTPException(404, f"{code} icin onbellekte veri yok. Once /api/refresh calistirin.")
     meta = conn.execute(
         "SELECT fund_name, kind, portfolio_size, investor_count, price, date"
-        " FROM prices WHERE fund_code = %s ORDER BY date DESC LIMIT 1",
+        " FROM prices WHERE fund_code = %s AND price > 0 ORDER BY date DESC LIMIT 1",
         (code,),
     ).fetchone()
     bd = conn.execute("SELECT date, allocation FROM breakdown WHERE fund_code = %s", (code,)).fetchone()
@@ -644,9 +647,9 @@ def fund_detail(code: str, conn: Db, user: User,
 
     # Period returns over whatever the cache holds, independent of the chosen range.
     hist = conn.execute(
-        "SELECT date, price FROM prices WHERE fund_code = %s ORDER BY date", (code,)
+        "SELECT date, price FROM prices WHERE fund_code = %s AND price > 0 ORDER BY date", (code,)
     ).fetchall()
-    prices = [r["price"] for r in hist if r["price"]]
+    prices = [r["price"] for r in hist]
     last = hist[-1]["price"]
     periods = {}
     for label, months in PERIODS:

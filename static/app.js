@@ -925,6 +925,7 @@ async function drawCompare() {
     delete charts["c-chart"];
     $("c-rows").innerHTML = "";
     $("c-tables").innerHTML = "";
+    $("c-note").textContent = "";
     $("c-empty").hidden = false;
     $("c-empty").textContent = "Karşılaştırmak için “Fon seç”e basın.";
     return;
@@ -936,7 +937,12 @@ async function drawCompare() {
     line("c-chart", dates, d.funds.map((f) => {
       const by = Object.fromEntries(f.series.map((p) => [p.date, p.value]));
       return { label: f.fund_code, data: dates.map((dt) => by[dt] ?? null), spanGaps: true };
-    }), "1 yıl önce = 100");
+    }), "başlangıç = 100");
+    // Önbellek 1 yılı karşılamıyorsa (yeni fon ya da kısa senkron) seri ilk
+    // fiyattan başlıyor; kısa aralık 1 yıllık grafik gibi görünmesin.
+    const short = d.funds.filter((f) => !f.periods["1Y"]);
+    $("c-note").innerHTML = short.length ? "1 yıllık veri yok, grafik ilk fiyattan başlıyor: "
+      + short.map((f) => `<b>${f.fund_code}</b> (${f.series[0].date})`).join(", ") : "";
     $("c-rows").innerHTML = d.funds.map((f) => `<tr>
       <td class="l"><span class="kod">${f.fund_code}</span></td>
       <td class="l name">${esc(f.fund_name)}</td>
