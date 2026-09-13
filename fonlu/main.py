@@ -220,6 +220,12 @@ def cron_sync(request: Request, kap_only: bool = False,
 # gelince onbellek ise yaramazdi. Girdi basina ~5 MB; dar bellekte _SCAN_MAX'i dusur.
 _SCAN_MAX = 8
 _scan_cache: "OrderedDict[tuple, list]" = OrderedDict()
+# Senkron (`def`) uc noktalar Starlette'in is parcacigi havuzunda kosuyor, yani
+# bu sozluge ayni anda birden fazla istek dokunuyor. "Iceride mi -> oku" ve
+# "dolu mu -> at -> yaz" adimlari bolunebilir: arada baska bir istek tahliye
+# ederse KeyError, yani 500. Kilit yalnizca sozluk islemlerini sariyor, sorguyu
+# degil; ayni anahtari iki istek birden hesaplarsa yalnizca is tekrarlanir.
+_scan_lock = threading.Lock()
 
 
 def _scan(conn, stamp: date, start: str, end: str,
@@ -248,9 +254,11 @@ def _scan(conn, stamp: date, start: str, end: str,
     `wanted` SQL'de kaliyor -- o indexli ve havuzu gercekten daraltiyor.
     """
     key = (stamp, start, end, wanted)
-    if key in _scan_cache:
-        _scan_cache.move_to_end(key)
-        return _scan_cache[key]
+    with _scan_lock:
+        cached = _scan_cache.get(key)
+        if cached is not None:
+            _scan_cache.move_to_end(key)
+            return cached
 
     code_filter = (" AND fund_code IN (%s)" % ",".join(["%s"] * len(wanted))) if wanted else ""
     rows = conn.execute(
@@ -307,9 +315,12 @@ def _scan(conn, stamp: date, start: str, end: str,
         (start, end, *(wanted or []), start, end, start, end, start, end, start, end, start, start),
     ).fetchall()
 
-    if len(_scan_cache) >= _SCAN_MAX:
-        _scan_cache.popitem(last=False)
-    _scan_cache[key] = rows
+    with _scan_lock:
+        # Tavan kontrolu ile yazim arasi bolunmesin: iki istek birden yazarsa
+        # sozluk _SCAN_MAX'i asabilirdi.
+        while len(_scan_cache) >= _SCAN_MAX:
+            _scan_cache.popitem(last=False)
+        _scan_cache[key] = rows
     return rows
 
 
