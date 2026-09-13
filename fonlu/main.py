@@ -195,10 +195,14 @@ def status(conn: Db, user: User):
                       s.price_rows AS rows, s.fund_count AS funds, s.kap_count AS kap
                FROM (SELECT 1) _ LEFT JOIN cache_stats s ON true"""
         ).fetchone()
-    except psycopg.errors.UndefinedTable:
-        # Kod, semayi goc ettirmeden once deploy edildi. Uc calismaya devam
-        # etsin: bir dagitimin, henuz kosmamis bir migration yuzunden 500
-        # dondurmesi kabul edilemez. Hata islemi iptal ediyor, once rollback.
+    except (psycopg.errors.UndefinedTable, psycopg.errors.InsufficientPrivilege):
+        # Tablo henuz yok (kod migration'dan once deploy edildi) ya da var ama
+        # role yetki verilmemis. Ikincisi kurulumda kolay kaciriliyor: kurulum
+        # GRANT ... ON ALL TABLES kullaniyor, bu yalnizca o an var olan
+        # tablolari kapsiyor ve semada varsayilan yetki tanimli degil.
+        # Iki durumda da uc calismaya devam etsin; bir dagitimin eksik bir
+        # migration ya da GRANT yuzunden 500 dondurmesi kabul edilemez.
+        # Hata islemi iptal ediyor, once rollback.
         conn.rollback()
         row = None
     if row is None or row["rows"] is None:

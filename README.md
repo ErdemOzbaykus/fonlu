@@ -86,6 +86,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA fonlu TO fonlu_app;
 -- positions.id bir identity sütunu; sequence yetkisi olmadan INSERT patlar.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA fonlu TO fonlu_app;
 
+-- ON ALL TABLES yalnızca o an var olan tabloları kapsar. Bundan sonra eklenen
+-- tablolar da kendiliğinden kapsansın, yoksa yeni bir tablo eklendiğinde
+-- uygulama "permission denied" alır ve sebebi kolay görünmez.
+ALTER DEFAULT PRIVILEGES IN SCHEMA fonlu
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fonlu_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA fonlu
+    GRANT USAGE, SELECT ON SEQUENCES TO fonlu_app;
+
 -- Uygulama bağlantısı search_path'i kendi ayarlamak zorunda kalmasın.
 ALTER ROLE fonlu_app SET search_path = fonlu;
 

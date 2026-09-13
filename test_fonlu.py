@@ -35,6 +35,20 @@ def connect_test(schema):
     return psycopg.connect(DSN, row_factory=dict_row, options=f"-c search_path={schema}")
 
 
+def _override_with_role(schema, role):
+    """Ucu belirli bir DB rolu altinda calistirir; geri alma fonksiyonu doner."""
+    onceki = main.app.dependency_overrides[main.db]
+
+    def _db():
+        with psycopg.connect(DSN, row_factory=dict_row,
+                             options=f"-c search_path={schema}") as cn:
+            cn.execute(f"SET ROLE {role}")
+            yield cn
+
+    main.app.dependency_overrides[main.db] = _db
+    return lambda: main.app.dependency_overrides.__setitem__(main.db, onceki)
+
+
 def _override(schema):
     """Gercek bagimlilik gibi generator olmali: duz lambda baglantiyi kapatmiyor."""
     pool = ConnectionPool(DSN, min_size=1, max_size=4, open=True,
@@ -185,6 +199,37 @@ assert tablosuz.status_code == 200, tablosuz.text
 assert tablosuz.json()["funds"] == 4 and tablosuz.json()["last_date"] == "2026-08-12", tablosuz.json()
 with connect_test(SCHEMA) as cn:
     cn.execute("ALTER TABLE cache_stats_gizli RENAME TO cache_stats")
+    cn.commit()
+
+# Tablo VAR ama role yetki verilmemisse de calismali. Kurulumdaki
+# GRANT ... ON ALL TABLES yalnizca o an var olan tablolari kapsiyor, yani
+# sonradan eklenen bir tablo kolayca yetkisiz kalabiliyor.
+ROL = "r" + SCHEMA[1:]          # kosuma ozel: yarim kalmis bir kosumla cakismasin
+with connect_test(SCHEMA) as cn:
+    cn.execute(f"CREATE ROLE {ROL} NOLOGIN")
+    cn.execute(f'GRANT USAGE ON SCHEMA "{SCHEMA}" TO {ROL}')
+    cn.execute(f'GRANT SELECT ON "{SCHEMA}".prices TO {ROL}')
+    cn.execute(f'GRANT SELECT ON "{SCHEMA}".kap_disclosures TO {ROL}')
+    cn.commit()
+    cn.execute(f"SET ROLE {ROL}")
+    try:
+        cn.execute("SELECT 1 FROM cache_stats")
+        raise AssertionError("yetki hala var, test anlamsiz")
+    except psycopg.errors.InsufficientPrivilege:
+        pass
+    cn.rollback()
+    cn.execute("RESET ROLE")
+    cn.commit()
+
+_yetkisiz = _override_with_role(SCHEMA, ROL)
+yetkisiz = c.get("/api/status")
+assert yetkisiz.status_code == 200, yetkisiz.text
+assert yetkisiz.json()["funds"] == 4, yetkisiz.json()
+_yetkisiz()
+with connect_test(SCHEMA) as cn:
+    # DROP ROLE, role bagli yetkiler dururken reddediliyor.
+    cn.execute(f"DROP OWNED BY {ROL}")
+    cn.execute(f"DROP ROLE {ROL}")
     cn.commit()
 
 # Sayimlar senkron sonunda yazilan cache_stats'ten geliyor, ama o satir
