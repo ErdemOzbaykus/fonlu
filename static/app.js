@@ -898,7 +898,24 @@ $("c-chips").onclick = (e) => {
   picked = picked.filter((c) => c !== b.dataset.code);
   drawCompare();
 };
-["c-start", "c-end"].forEach((id) => $(id).onchange = () => picked.length && drawCompare());
+const C_PERIODS = [["1A", "1 Ay"], ["3A", "3 Ay"], ["6A", "6 Ay"], ["1Y", "1 Yıl"]];
+// [alan, başlık, biçim, yön]: yön +1 büyük iyi, -1 küçük iyi. Küçüğün iyi
+// olduğu kalem (volatilite) işaretsiz bir büyüklük, yeşil/kırmızı boyanmaz.
+const signedTl = (v) => (v == null ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}₺${compact(Math.abs(v))}`);
+const C_METRICS = [
+  ["return_pct", "Getiri", pct, 1],
+  ["flow", "Net nakit akışı", signedTl, 1],
+  ["flow_pct", "Nakit akışı / dönem başı büyüklük", pct, 1],
+  ["size_pct", "Büyüklük değişimi", pct, 1],
+  ["investors_pct", "Yatırımcı sayısı değişimi", pct, 1],
+  ["volatility_pct", "Volatilite (yıllık)", (v) => (v == null ? "—" : `${num(v)}%`), -1],
+  ["max_drawdown_pct", "En büyük düşüş", pct, 1],
+];
+// Tek fonda "en iyi" anlamsız; en az iki değer varsa işaretlenir.
+function bestOf(vals, dir) {
+  const xs = vals.filter((v) => v != null);
+  return xs.length > 1 ? (dir > 0 ? Math.max(...xs) : Math.min(...xs)) : null;
+}
 
 async function drawCompare() {
   $("c-chips").innerHTML = picked.map((c) =>
@@ -907,26 +924,37 @@ async function drawCompare() {
     charts["c-chart"]?.destroy();
     delete charts["c-chart"];
     $("c-rows").innerHTML = "";
+    $("c-tables").innerHTML = "";
     $("c-empty").hidden = false;
     $("c-empty").textContent = "Karşılaştırmak için “Fon seç”e basın.";
     return;
   }
   $("c-empty").hidden = true;
   try {
-    const d = await api(`/compare?codes=${picked.join(",")}` +
-      `&start=${$("c-start").value}&end=${$("c-end").value}`);
+    const d = await api(`/compare?codes=${picked.join(",")}`);
     const dates = [...new Set(d.funds.flatMap((f) => f.series.map((p) => p.date)))].sort();
     line("c-chart", dates, d.funds.map((f) => {
       const by = Object.fromEntries(f.series.map((p) => [p.date, p.value]));
       return { label: f.fund_code, data: dates.map((dt) => by[dt] ?? null), spanGaps: true };
-    }), "başlangıç = 100");
-    const byCode = Object.fromEntries(funds.map((f) => [f.fund_code, f.fund_name]));
+    }), "1 yıl önce = 100");
     $("c-rows").innerHTML = d.funds.map((f) => `<tr>
       <td class="l"><span class="kod">${f.fund_code}</span></td>
-      <td class="l name">${esc(byCode[f.fund_code] || "")}</td>${cell(f.return_pct)}</tr>`).join("");
+      <td class="l name">${esc(f.fund_name)}</td>
+      <td class="num">₺${compact(f.portfolio_size)}</td><td class="num">${int(f.investor_count)}</td></tr>`).join("");
+    $("c-tables").innerHTML = C_METRICS.map(([key, title, fmt, dir]) => {
+      const tops = C_PERIODS.map(([p]) => bestOf(d.funds.map((f) => f.periods[p]?.[key]), dir));
+      return `<div><span class="eyebrow">${title}</span><table><thead><tr><th class="l">Kod</th>
+        ${C_PERIODS.map(([, l]) => `<th>${l}</th>`).join("")}</tr></thead><tbody>
+        ${d.funds.map((f) => `<tr><td class="l"><span class="kod">${f.fund_code}</span></td>
+          ${C_PERIODS.map(([p], i) => {
+            const v = f.periods[p]?.[key];
+            return `<td class="num ${dir > 0 ? cls(v) : ""}${v != null && v === tops[i] ? " best" : ""}">${fmt(v)}</td>`;
+          }).join("")}</tr>`).join("")}
+      </tbody></table></div>`;
+    }).join("");
     if (d.missing.length) {
       $("c-empty").hidden = false;
-      $("c-empty").innerHTML = `Bu dönemde veri yok: <b>${d.missing.join(", ")}</b>`;
+      $("c-empty").innerHTML = `Veri yok: <b>${d.missing.join(", ")}</b>`;
     }
   } catch (e) {
     $("c-empty").hidden = false;
@@ -1034,8 +1062,6 @@ async function boot() {
   await busy((async () => {
     lastDataDate = (await loadStatus())?.last_date || lastDataDate;
     applyPeriod(1);
-    $("c-end").value = lastDataDate;
-    $("c-start").value = monthsBack(lastDataDate, 3);
     await loadWatchlist();
     await loadFunds();
   })());

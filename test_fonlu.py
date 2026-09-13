@@ -117,9 +117,11 @@ def build_periods_client():
         conn.commit()
 
     _override(schema)
-    out = TestClient(main.app).get("/api/funds/PPP").json()["periods"]
+    client = TestClient(main.app)
+    out = client.get("/api/funds/PPP").json()["periods"]
+    cmp_ = client.get("/api/compare", params={"codes": "PPP"}).json()
     main.app.dependency_overrides[main.db] = _restore
-    return out
+    return out, cmp_
 
 
 def build_anchor_client():
@@ -323,10 +325,23 @@ assert d["periods"] == {"1A": None, "3A": None, "6A": None, "1Y": None}, d["peri
 
 # A period whose cutoff lands on a weekend still counts: TEFAS publishes no price
 # that day, so the first cached date is legitimately a day or two later.
-per = build_periods_client()
+per, pcmp = build_periods_client()
 assert per["3A"] is not None, per   # cutoff is a Saturday, data starts the Monday
 assert per["1A"] is not None, per
 assert per["6A"] is None and per["1Y"] is None, per  # genuinely not seeded
+# Karsilastirma ayni ankoru kullanmali: donem getirileri detaydakiyle birebir.
+cp = pcmp["funds"][0]["periods"]
+assert {k: v and v["return_pct"] for k, v in cp.items()} == per, cp
+
+# Kiyas kalemleri: akis = pay degisimi x o gunun fiyati (pay sayisi eksik gun
+# atlanir), yuzdesi donem basi buyukluge gore.
+st = main._window_stats([
+    {"price": 10.0, "shares_outstanding": 100.0, "portfolio_size": 1000.0, "investor_count": 50},
+    {"price": 11.0, "shares_outstanding": 110.0, "portfolio_size": 1210.0, "investor_count": 55},
+    {"price": 12.0, "shares_outstanding": None, "portfolio_size": 1300.0, "investor_count": 60}])
+assert st["flow"] == 110 and st["flow_pct"] == 11.0, st
+assert st["return_pct"] == 20.0 and st["size_pct"] == 30.0 and st["investors_pct"] == 20.0, st
+assert st["volatility_pct"] is None, st  # 2 gunluk getiri risk icin az
 
 # "1 ay önce" is the same day of the previous month, not 30 calendar days back.
 # Anchoring on 30 days shifted the baseline and pushed returns off TEFAS's figures.
@@ -342,8 +357,11 @@ assert len(kap) == 1 and kap[0]["url"].endswith("/Bildirim/999")
 assert kap[0]["subject"] == "Portföy Dağılım Raporu"
 assert c.get("/api/funds/BBB/kap").json()["disclosures"] == []
 
-cmp = c.get("/api/compare", params={**R, "codes": "aaa,BBB,ZZZ"}).json()
+cmp = c.get("/api/compare", params={"codes": "aaa,BBB,ZZZ"}).json()
 assert cmp["missing"] == ["ZZZ"]
+assert cmp["funds"][0]["fund_name"] == "Test AAA" and cmp["funds"][0]["portfolio_size"] == 1000
+# 3 gunluk gecmis hicbir donemi karsilamiyor; uydurma deger yerine bos kalmali.
+assert cmp["funds"][0]["periods"] == {"1A": None, "3A": None, "6A": None, "1Y": None}
 assert [p["value"] for p in cmp["funds"][0]["series"]] == [100.0, 150.0, 200.0]
 assert cmp["funds"][1]["series"][-1]["value"] == 80.0
 

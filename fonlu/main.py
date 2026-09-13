@@ -136,6 +136,24 @@ def _months_back(d: date, months: int) -> date:
     return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
 
 
+PERIODS = (("1A", 1), ("3A", 3), ("6A", 6), ("1Y", 12))
+
+
+def _anchor(hist, months: int) -> Optional[int]:
+    """Donem ankorunun `hist` icindeki indeksi; gecmis yetmiyorsa None.
+
+    TEFAS'in yaptigi gibi hedef tarihteki ya da ONCESINDEKI son fiyata baglanir;
+    hedef hafta sonuna denk gelirse bir sonraki islem gunune atlamak donemi
+    kisaltip getiriyi yukseltiyor. Onbellek tam o gune yetismiyor ama birkac
+    gun icinde basliyorsa ilk satir kabul edilir.
+    """
+    target = _months_back(hist[-1]["date"], months)
+    prior = [i for i, r in enumerate(hist) if r["date"] <= target]
+    if prior:
+        return prior[-1]
+    return 0 if hist[0]["date"] <= target + timedelta(days=GRACE_DAYS) else None
+
+
 def db():
     with store.get_pool().connection() as conn:
         yield conn
@@ -481,6 +499,28 @@ def _risk(prices: list[float]) -> dict:
     }
 
 
+def _window_stats(w) -> dict:
+    """Bir donemin kiyas kalemleri; `w` ankordan son gune kadar satirlar.
+
+    Net akis detaydaki grafikle ayni kural: pay sayisi degisimi x o gunun
+    fiyati. Yuzdesi, engine._akis gibi donem BASINDAKI buyukluge gore.
+    """
+    a, b = w[0], w[-1]
+    pairs = [(x, y) for x, y in zip(w, w[1:])
+             if x["shares_outstanding"] is not None and y["shares_outstanding"] is not None]
+    flow = sum((y["shares_outstanding"] - x["shares_outstanding"]) * y["price"]
+               for x, y in pairs) if pairs else None
+    start = a["price"] * a["shares_outstanding"] if a["shares_outstanding"] else None
+    return {
+        "return_pct": _pct(a["price"], b["price"]),
+        "flow": None if flow is None else round(flow),
+        "flow_pct": round(flow / start * 100, 2) if flow is not None and start else None,
+        "size_pct": _pct(a["portfolio_size"], b["portfolio_size"]),
+        "investors_pct": _pct(a["investor_count"], b["investor_count"]),
+        **_risk([r["price"] for r in w]),
+    }
+
+
 # Coarse buckets so a fund can be filtered by what it actually holds. TEFAS
 # encodes this in the fund title; deriving it from the breakdown is more honest.
 CATEGORY_RULES = [
@@ -609,22 +649,9 @@ def fund_detail(code: str, conn: Db, user: User,
     prices = [r["price"] for r in hist if r["price"]]
     last = hist[-1]["price"]
     periods = {}
-    # prices.date artik gercek `date`; fromisoformat'a gerek yok.
-    last_date = hist[-1]["date"]
-    first_date = hist[0]["date"]
-    for label, months in (("1A", 1), ("3A", 3), ("6A", 6), ("1Y", 12)):
-        target = _months_back(last_date, months)
-        # TEFAS'in yaptigi gibi hedef tarihteki ya da ONCESINDEKI son fiyata
-        # bagla; hedef hafta sonuna denk gelirse bir sonraki islem gunune atlamak
-        # donemi kisaltip getiriyi yukseltiyor.
-        prior = [r for r in hist if r["date"] <= target]
-        if prior:
-            periods[label] = _pct(prior[-1]["price"], last)
-        elif first_date <= target + timedelta(days=GRACE_DAYS):
-            # Onbellek tam o gune yetismiyor ama birkac gun icinde basliyor.
-            periods[label] = _pct(hist[0]["price"], last)
-        else:
-            periods[label] = None
+    for label, months in PERIODS:
+        i = _anchor(hist, months)
+        periods[label] = None if i is None else _pct(hist[i]["price"], last)
 
     return {
         "fund_code": code,
@@ -954,31 +981,36 @@ def compare(
     conn: Db,
     user: User,
     codes: str = Query(..., description="Virgulle ayrilmis fon kodlari"),
-    start: Optional[str] = None,
-    end: Optional[str] = None,
 ):
-    """Each fund indexed to 100 at its first price in the range."""
+    """1A/3A/6A/1Y icin ayni anda getiri, nakit akisi, buyukluk, yatirimci ve
+    risk kiyasi. Donemler fon detayindaki ankorla kuruluyor, secili araliktan
+    bagimsiz. Grafik son 1 yil (ya da fonun tum gecmisi), baslangic = 100."""
     wanted = [c.strip().upper() for c in codes.split(",") if c.strip()][:10]
     if not wanted:
         raise HTTPException(400, "En az bir fon kodu verin.")
-    start, end = _range(start, end)
-    result, missing = [], []
-    for code in wanted:
-        rows = conn.execute(
-            "SELECT date, price FROM prices WHERE fund_code = %s AND date BETWEEN %s AND %s"
-            " ORDER BY date",
-            (code, start, end),
-        ).fetchall()
-        if not rows or not rows[0]["price"]:
-            missing.append(code)
-            continue
-        base = rows[0]["price"]
+    # Tek sorgu: fon basina ayri sorgu uzak veritabaninda 10 gidis-donus demek.
+    by: dict = {}
+    for r in conn.execute(
+        "SELECT fund_code, date, fund_name, price, shares_outstanding, portfolio_size,"
+        " investor_count FROM prices WHERE fund_code = ANY(%s) AND price > 0"
+        " ORDER BY fund_code, date", (wanted,)):
+        by.setdefault(r["fund_code"], []).append(r)
+    result = []
+    for code in (c for c in wanted if c in by):
+        hist, last = by[code], by[code][-1]
+        periods = {}
+        for label, months in PERIODS:
+            i = _anchor(hist, months)
+            periods[label] = None if i is None else _window_stats(hist[i:])
+        chart = hist[_anchor(hist, 12) or 0:]
+        base = chart[0]["price"]
         result.append({
-            "fund_code": code,
-            "return_pct": _pct(base, rows[-1]["price"]),
-            "series": [{"date": r["date"], "value": round(r["price"] / base * 100, 3)} for r in rows],
+            "fund_code": code, "fund_name": last["fund_name"],
+            "portfolio_size": last["portfolio_size"], "investor_count": last["investor_count"],
+            "periods": periods,
+            "series": [{"date": r["date"], "value": round(r["price"] / base * 100, 3)} for r in chart],
         })
-    return {"start": start, "end": end, "funds": result, "missing": missing}
+    return {"funds": result, "missing": [c for c in wanted if c not in by]}
 
 
 class PositionIn(BaseModel):

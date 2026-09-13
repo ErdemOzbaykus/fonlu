@@ -18,7 +18,8 @@ veritabanı her iki durumda da sizin Supabase projeniz.
   düşüş, varlık dağılımı donut'u ve fonun KAP bildirimleri.
 - **Kalem bazlı portföy** — KAP PDF'inden çıkarılan gerçek kalemler (hangi hisse,
   hangi kira sertifikası) ve bir önceki aya göre değişim.
-- **Karşılaştırma** — en fazla 10 fonun 100'e normalize edilmiş getiri grafiği.
+- **Karşılaştırma** — en fazla 10 fonun 100'e normalize edilmiş getiri grafiği ve
+  1A/3A/6A/1Y için getiri, nakit akışı, büyüklük, yatırımcı ve risk kıyası.
 - **Portföy** — pozisyon girişi, güncel değerleme, kar/zarar.
 - **Takip listesi** — kullanıcıya özel, filtrelerden bağımsız.
 
@@ -469,7 +470,9 @@ Her iki durumda da Supabase'deki **Relying Party ID**'yi bu hostname'e ayarlayı
   görünüm sadece kaydettiklerinizi gösterir ve hepsini tek tıkla karşılaştırmaya taşır.
   Kendi isteğini attığı için Fonlar sekmesindeki filtreden etkilenmez.
 - **Karşılaştır** — "Fon seç" aranabilir bir liste açar, kutucukla en fazla 10 fon
-  seçilir; grafik başlangıcı 100'e normalize eder.
+  seçilir; grafik son 1 yılı 100'e normalize eder. Altında 1 ay / 3 ay / 6 ay / 1 yıl
+  için aynı anda getiri, net nakit akışı, büyüklük ve yatırımcı değişimi, volatilite ve
+  en büyük düşüş tabloları; her sütunun en iyisi kalın.
 - **Portföy** — pozisyon ekleme formu, toplam maliyet/değer/kar-zarar ve pozisyon tablosu.
 - **Bildirimler** — takip edilen fonların KAP bildirimleri, okundu işaretiyle.
 
@@ -488,7 +491,7 @@ Her iki durumda da Supabase'deki **Relying Party ID**'yi bu hostname'e ayarlayı
 | `GET /api/kap/{index}/attachments` | Bildirimin PDF ekleri (KAP'a canlı gider) |
 | `GET /api/kap/file/{objId}` | Eki temiz PDF olarak servis eder |
 | `GET /api/watchlist`, `PUT/DELETE /api/watchlist/{kod}` | Takip listesi |
-| `GET /api/compare?codes=A,B` | 100'e normalize edilmiş getiri serileri (max 10 fon) |
+| `GET /api/compare?codes=A,B` | 1 yıllık normalize seri + 1A/3A/6A/1Y kıyas kalemleri (max 10 fon) |
 | `GET/POST /api/positions`, `DELETE /api/positions/{id}` | Portföy CRUD + değerleme |
 
 ## KAP entegrasyonu

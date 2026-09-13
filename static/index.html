@@ -118,6 +118,14 @@ tbody tr.clickable:hover { background:#ffffff0a; }
 .faint { color:var(--faint); }
 /* max-width:1px + a percentage width is what makes a table cell actually clip. */
 td.name { max-width:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Karsilastir: her kalem icin fon x donem tablosu; dar ekranda tek sutun. */
+#c-tables { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  gap:20px; margin-top:24px; }
+#c-tables > div { overflow-x:auto; }
+/* "+₺1,3 Mn" dar ekranda isaretten bolunuyordu. */
+#c-tables th, #c-tables td { white-space:nowrap; padding-left:8px; padding-right:8px; }
+#c-tables .eyebrow { display:block; margin-bottom:6px; }
+td.best { font-weight:700; background:#ffffff08; }
 #s-table td.name, #w-table td.name { width:34%; }
 #d-stockrows td.name { width:52%; }
 #p-rows td.name { width:26%; }
@@ -318,11 +326,7 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
 
   /* Ekranin adi alt cubukta zaten yaziyor, baslik satir yiyor. */
   .topbar h2 { display:none; }
-  /* Karsilastir: tarihler yan yana, "Fon sec" altta tam genislik. Yatay
-     seritte buton ekranin disinda kaliyordu. */
-  #compare .topbar { display:grid; grid-template-columns:1fr 1fr; gap:10px; overflow:visible; }
-  #compare .topbar input { width:100%; }
-  #c-pick { grid-column:span 2; padding:12px; }
+  #c-pick { flex:1 1 auto; padding:12px; }
 
   /* Filtreler: ust cubukta sadece donem + "Filtre"; gerisi alttan acilan
      sayfada. Sekiz alan yan yana durunca listeye yer kalmiyordu. */
@@ -548,8 +552,6 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
   <section id="compare" class="view">
     <div class="topbar">
       <h2>Karşılaştır</h2>
-      <label class="f"><span>Başlangıç</span><input type="date" id="c-start"></label>
-      <label class="f"><span>Bitiş</span><input type="date" id="c-end"></label>
       <button class="btn primary" id="c-pick">Fon seç</button>
     </div>
     <div class="pad" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -559,8 +561,9 @@ td.star-cell, th.star-cell { width:34px; padding-left:14px; padding-right:0; }
     <div class="body pad" style="padding-top:0">
       <div class="card chartbox" style="margin-bottom:16px"><canvas id="c-chart"></canvas></div>
       <table><thead><tr>
-        <th class="l">Kod</th><th class="l">Fon adı</th><th>Dönem getirisi %</th>
+        <th class="l">Kod</th><th class="l">Fon adı</th><th>Büyüklük</th><th>Yatırımcı</th>
       </tr></thead><tbody id="c-rows"></tbody></table>
+      <div id="c-tables"></div>
       <div class="empty" id="c-empty">Karşılaştırmak için “Fon seç”e basın.</div>
     </div>
   </section>
