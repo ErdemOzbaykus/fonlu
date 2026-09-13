@@ -189,13 +189,22 @@ def status(conn: Db, user: User):
     last_date bilerek canli kaliyor: arayuz donem alanlarini ona gore kuruyor,
     bayat bir deger orada gercek bir hataya donusur. Index'ten 3 ms'de geliyor.
     """
-    row = conn.execute(
-        """SELECT (SELECT MAX(date) FROM prices) AS last_date,
-                  s.price_rows AS rows, s.fund_count AS funds, s.kap_count AS kap
-           FROM (SELECT 1) _ LEFT JOIN cache_stats s ON true"""
-    ).fetchone()
-    if row["rows"] is None:      # ilk senkrondan once: bir kez canli hesapla
-        row = {**row, **conn.execute(_SAYIM_CANLI).fetchone()}
+    try:
+        row = conn.execute(
+            """SELECT (SELECT MAX(date) FROM prices) AS last_date,
+                      s.price_rows AS rows, s.fund_count AS funds, s.kap_count AS kap
+               FROM (SELECT 1) _ LEFT JOIN cache_stats s ON true"""
+        ).fetchone()
+    except psycopg.errors.UndefinedTable:
+        # Kod, semayi goc ettirmeden once deploy edildi. Uc calismaya devam
+        # etsin: bir dagitimin, henuz kosmamis bir migration yuzunden 500
+        # dondurmesi kabul edilemez. Hata islemi iptal ediyor, once rollback.
+        conn.rollback()
+        row = None
+    if row is None or row["rows"] is None:
+        # cache_stats yok ya da ilk senkron henuz kosmadi: eski canli yol.
+        row = {**conn.execute("SELECT MAX(date) AS last_date FROM prices").fetchone(),
+               **conn.execute(_SAYIM_CANLI).fetchone()}
     return {**row, "refresh": refresh_state}
 
 

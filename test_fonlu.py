@@ -175,8 +175,20 @@ anch = build_anchor_client()
 assert anch["EEE"]["first_date"] == "2026-08-07", anch["EEE"]   # not 2026-08-03
 assert anch["EEE"]["return_pct"] == 20.0, anch["EEE"]           # not 50.0
 
-# /api/status: sayimlar senkron sonunda yazilan cache_stats'ten geliyor, ama o
-# satir yokken (ilk senkrondan once) canli hesaplanmali -- ayni sonucla.
+# /api/status: TABLO HIC YOKKEN de calismali. Kod semayi goc ettirmeden once
+# deploy edilirse uc 500 dondurmemeli; bu tam olarak bir kez basimiza geldi.
+with connect_test(SCHEMA) as cn:
+    cn.execute("ALTER TABLE cache_stats RENAME TO cache_stats_gizli")
+    cn.commit()
+tablosuz = c.get("/api/status")
+assert tablosuz.status_code == 200, tablosuz.text
+assert tablosuz.json()["funds"] == 4 and tablosuz.json()["last_date"] == "2026-08-12", tablosuz.json()
+with connect_test(SCHEMA) as cn:
+    cn.execute("ALTER TABLE cache_stats_gizli RENAME TO cache_stats")
+    cn.commit()
+
+# Sayimlar senkron sonunda yazilan cache_stats'ten geliyor, ama o satir
+# yokken (ilk senkrondan once) canli hesaplanmali -- ayni sonucla.
 canli = c.get("/api/status").json()
 assert canli["funds"] == 4 and canli["last_date"] == "2026-08-12", canli
 assert canli["rows"] == len(PRICES) and canli["kap"] == 1, canli
